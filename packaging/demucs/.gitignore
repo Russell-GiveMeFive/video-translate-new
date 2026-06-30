@@ -1,0 +1,9 @@
+# PyInstaller / Python build artifacts
+venv/
+build/
+dist/
+torch_hub_cache/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/

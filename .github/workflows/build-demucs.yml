@@ -1,0 +1,108 @@
+# DramaPrime demucs binary 多平台构建
+#
+# 触发：push tag v* 或手动 dispatch
+# 产物：每个平台一个 tar.gz，附加到 GitHub Release（如果是 tag push）
+
+name: Build Demucs Binary
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号（如 v0.6.0），手动触发时附在 artifact 名上'
+        required: false
+        default: 'dev'
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14         # Apple Silicon (arm64)
+            platform_arch: darwin-arm64
+            shell: bash
+          - os: macos-13         # Intel (x64)
+            platform_arch: darwin-x64
+            shell: bash
+          - os: windows-latest   # x64
+            platform_arch: win32-x64   # 与 electron-builder ${os}-${arch} 对齐
+            shell: pwsh
+
+    runs-on: ${{ matrix.os }}
+    name: Build demucs (${{ matrix.platform_arch }})
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache pip + torch hub
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+            packaging/demucs/torch_hub_cache
+          key: demucs-${{ matrix.platform_arch }}-${{ hashFiles('packaging/demucs/requirements.txt') }}
+          restore-keys: |
+            demucs-${{ matrix.platform_arch }}-
+
+      - name: Build (macOS / Linux)
+        if: matrix.os != 'windows-latest'
+        shell: bash
+        run: |
+          cd packaging/demucs
+          ./build.sh
+
+      - name: Build (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          cd packaging\demucs
+          .\build.ps1
+
+      - name: Verify binary
+        shell: ${{ matrix.shell }}
+        run: |
+          ls -la binaries/demucs/${{ matrix.platform_arch }}/
+          # 跑一次 --help 确认能起来
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            ./binaries/demucs/${{ matrix.platform_arch }}/demucs.exe --help | head -5
+          else
+            ./binaries/demucs/${{ matrix.platform_arch }}/demucs --help | head -5
+          fi
+
+      - name: Archive
+        shell: ${{ matrix.shell }}
+        run: |
+          cd binaries/demucs
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            # Windows 用 7z 打 tar.gz；或直接 zip
+            tar -czf "demucs-${{ matrix.platform_arch }}.tar.gz" "${{ matrix.platform_arch }}"
+          else
+            tar -czf "demucs-${{ matrix.platform_arch }}.tar.gz" "${{ matrix.platform_arch }}"
+          fi
+          ls -la *.tar.gz
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: demucs-${{ matrix.platform_arch }}
+          path: binaries/demucs/demucs-${{ matrix.platform_arch }}.tar.gz
+          retention-days: 30
+
+      - name: Attach to release (tag push only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: binaries/demucs/demucs-${{ matrix.platform_arch }}.tar.gz
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

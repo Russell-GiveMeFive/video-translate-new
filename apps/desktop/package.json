@@ -1,0 +1,49 @@
+{
+  "name": "@dramaprime/desktop",
+  "version": "0.4.23",
+  "private": true,
+  "type": "module",
+  "main": "./out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev --watch",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "dist": "electron-builder",
+    "dist:mac": "electron-builder --mac",
+    "dist:win": "electron-builder --win",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json"
+  },
+  "dependencies": {
+    "@dramaprime/align-engine": "workspace:*",
+    "@dramaprime/core-types": "workspace:*",
+    "@dramaprime/pipeline-core": "workspace:*",
+    "@dramaprime/provider-MiniMax": "workspace:*",
+    "@dramaprime/provider-volcengine": "workspace:*",
+    "@dramaprime/subtitle": "workspace:*",
+    "@ffmpeg-installer/ffmpeg": "^1.1.0",
+    "@ffprobe-installer/ffprobe": "^2.1.2",
+    "better-sqlite3": "^11.3.0",
+    "electron-updater": "^6.3.4",
+    "keytar": "^7.9.0",
+    "pino": "^9.4.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@electron/rebuild": "^4.0.4",
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/react": "^18.3.5",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "autoprefixer": "^10.4.20",
+    "electron": "^32.0.0",
+    "electron-builder": "^25.0.5",
+    "electron-vite": "^2.3.0",
+    "postcss": "^8.4.45",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "tailwindcss": "^3.4.10",
+    "typescript": "^5.5.4",
+    "vite": "^5.4.3",
+    "zustand": "^4.5.5"
+  }
+}

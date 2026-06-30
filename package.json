@@ -1,0 +1,27 @@
+{
+  "name": "dramaprime",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Drama-Prime · 短剧 AI 译制桌面工作站",
+  "packageManager": "pnpm@9.12.0",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "dev": "pnpm --filter @dramaprime/desktop dev",
+    "build": "pnpm -r --filter=./packages/** build && pnpm sync:dist && pnpm --filter @dramaprime/desktop build",
+    "dist": "pnpm build && pnpm --filter @dramaprime/desktop dist",
+    "dist:mac": "pnpm build && pnpm --filter @dramaprime/desktop dist:mac",
+    "dist:win": "pnpm build && pnpm --filter @dramaprime/desktop dist:win",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "pnpm -r lint",
+    "format": "prettier --write .",
+    "clean": "pnpm -r exec rm -rf dist out node_modules .turbo",
+    "sync:dist": "node scripts/sync-workspace-dist.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "prettier": "^3.3.3",
+    "typescript": "^5.5.4"
+  }
+}

@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DramaPrime · 短剧 AI 译制</title>
+    <!--
+      注意：生产模式的 CSP 由 main 进程的 webRequest header 注入（更严格）；
+      这里只写一个 dev / prod 通用的最低基线，避免阻断 Vite HMR。
+      Vite dev HMR 需要：'unsafe-eval'、ws:、http://localhost:*
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self' app: ws: http://localhost:*; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; media-src 'self' app: blob: data:; img-src 'self' app: data: https:; connect-src 'self' app: ws: http://localhost:* https:;"
+    />
+  </head>
+  <body class="bg-zinc-950 text-zinc-100">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

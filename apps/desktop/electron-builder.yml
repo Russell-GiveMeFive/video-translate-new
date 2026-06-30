@@ -1,0 +1,69 @@
+appId: chat.dramaprime.desktop
+productName: DramaPrime
+copyright: Copyright © 2026 DramaPrime
+directories:
+  output: release
+  buildResources: build
+files:
+  - out/**/*
+  - package.json
+  # ★ v0.4.13 monorepo 兄弟包：pnpm 把 workspace 包符号链接到 node_modules
+  # electron-builder 默认会打 node_modules 下的所有依赖，但 workspace 符号链接
+  # 指向 packages/*/src/ 源码，运行时 require 不到——必须显式包含 dist/
+  - 'node_modules/@dramaprime/align-engine/dist/**/*'
+  - 'node_modules/@dramaprime/core-types/dist/**/*'
+  - 'node_modules/@dramaprime/pipeline-core/dist/**/*'
+  - 'node_modules/@dramaprime/provider-MiniMax/dist/**/*'
+  - 'node_modules/@dramaprime/provider-volcengine/dist/**/*'
+  - 'node_modules/@dramaprime/subtitle/dist/**/*'
+  - '!**/node_modules/*/{CHANGELOG.md,README.md,README,readme.md,readme}'
+  - '!**/node_modules/*/{test,__tests__,tests,powered-test,example,examples}'
+  - '!**/{.DS_Store,.git,.idea,.vscode}'
+asar: true
+# v0.4.22: 跳过 electron-builder 内置 rebuild —— build.sh 已显式跑过 electron-rebuild
+# 否则 pnpm 的 node_modules/.pnpm/ 布局会让 @electron/rebuild 找不到 date-fns 报 ENOENT
+npmRebuild: false
+asarUnpack:
+  - 'node_modules/keytar/**'
+  - 'node_modules/better-sqlite3/**'
+  # ffmpeg-installer / ffprobe-installer 的二进制必须从 asar 中 unpack，
+  # 否则 child_process spawn 无法执行 asar 内文件。
+  - 'node_modules/@ffmpeg-installer/**'
+  - 'node_modules/@ffprobe-installer/**'
+extraResources:
+  - from: ../../binaries/ffmpeg/${os}-${arch}
+    to: binaries/ffmpeg
+    filter: ['**/*']
+  - from: ../../binaries/sidecar/${os}-${arch}
+    to: binaries/sidecar
+    filter: ['**/*']
+  # v0.6+ demucs standalone binary（PyInstaller 打包）
+  # 路径形如 binaries/demucs/darwin-arm64/demucs；packaging/demucs/build.sh 产出
+  - from: ../../binaries/demucs/${os}-${arch}
+    to: binaries/demucs/${os}-${arch}
+    filter: ['**/*']
+
+mac:
+  category: public.app-category.video
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  notarize: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  target:
+    - target: dmg
+      arch: universal
+  artifactName: ${productName}-${version}-${arch}.${ext}
+
+win:
+  # v0.4.13 两个 target 共用 artifactName 会覆盖
+  # 暂时只出 Setup（用户最常用的安装版）；需要 portable 时单独跑 --win portable
+  target:
+    - target: nsis
+      arch: x64
+  artifactName: ${productName}-${version}-${arch}-Setup.${ext}
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true

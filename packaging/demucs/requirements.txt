@@ -1,0 +1,13 @@
+# Demucs binary 锁定的依赖版本
+# 重要：torch 走 CPU-only 渠道 (不带 CUDA)
+# pip install --index-url https://download.pytorch.org/whl/cpu torch torchaudio
+# 然后再装 demucs
+
+--index-url https://download.pytorch.org/whl/cpu
+--extra-index-url https://pypi.org/simple
+
+torch==2.2.2
+torchaudio==2.2.2
+numpy<2.0.0          # demucs 4.0.1 还不兼容 numpy 2.x
+demucs==4.0.1
+pyinstaller==6.10.0
