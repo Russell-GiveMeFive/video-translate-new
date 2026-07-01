@@ -1,6 +1,6 @@
 # DramaPrime — 技术实现总览 v0.5
 
-> 2026-06-08 · 译制流水线从骨架到真实流跑通后的工程总结
+> 2026-07-01 · 译制流水线 + 保留原音预处理闭环全部落地后的工程总结
 >
 > 配套阅读：`PRD.md`（产品决策与场景）· `TDD.md`（技术设计文档）· 本文聚焦"**已落地实现 + 经验值 + 坑**"
 
@@ -295,6 +295,56 @@ SYSTEM_VOICES_MALE = ['male-qn-jingying', 'male-qn-qingse', 'male-qn-badao',
 - `tts_*` 7 字段记录"上次合成用了什么参数"
 - `user_*` 4 字段记录"导演手动 override"，TTS stage 优先读 override
 
+### 3.10 保留原音预处理（v0.5 新增）
+
+**问题**：短剧里有大量场景不希望被译制覆盖——武打对白、笑声、歌曲、氛围声。之前只能靠
+per-segment `useOriginalAudio` 一句一句勾（工作台），费时且必须等 ASR 跑完才能操作。
+
+**方案**：新加"预处理 tab"——用户在 ASR 之前就能画时间轴刷子选段，最终合成时这些段直接
+用**源视频完整音轨**替换（BGM/音效/人声原封不动），且不显示字幕。
+
+**四层实现**：
+
+1. **数据模型**（无 schema 变更）：`ProjectConfig.originalAudioRanges: OriginalAudioRange[]`
+   直接存 config JSON，`OriginalAudioRange = {id, startMs, endMs, note?}`
+
+2. **UI（`PreprocessPanel.tsx`）**：
+   - HTML5 `<video>` 播源视频，走 `app://local/<绝对路径>` 白名单
+   - 时间轴叠 5 张 preprocess 缩略图 + 游标 + hover 时间提示
+   - 刷子模式按住拖动画段；两端琥珀色小竖条把手可拖调整边界
+   - 帧对齐（读 preprocess/metadata.json 的 fps）+ 帧号显示
+   - 列表内联可编辑起止时间（`TimeInput` 组件，支持 `M:SS.mmm` / `Ns` / `Nms` / `Nf` 多格式）
+   - 四种删除方式：range 右上角 ✕ / 列表行 ✕ / Delete 键 / 清空全部
+
+3. **IPC handler + 失效逻辑**（`ipc/project.ts`）：
+   - `set-original-audio-ranges` 落库 → `normalizeRanges` 排序+相邻 100ms 合并 →
+     `StageRepo.reset('subtitle-burn' | 'mix-render')` **只失效这两个** stage
+   - `register-source-preview` 把源视频 clear+add 到 `allowedSingleFiles` 白名单
+   - `get-preprocess-meta` 读 `preprocess/metadata.json` + 拼 5 张缩略图 `app://` URL
+
+4. **mix-render 的 filter graph gate + refill**（`ffmpeg-stages.ts`）：
+   - range 命中的 segment 从 `segs` 剔除（不入 mix）—— **不用 srcAudioPath**，那个只有 vocals，
+     缺失 BGM/音效
+   - `mix_pre` = 伴奏 + silence + TTS 各段（原有逻辑）
+   - `mix_gated` = `mix_pre` 在所有 range 时间段 `volume=0`（用 `enable='between(t,S,E)+...'`）
+   - 每个 range → `[0:a] atrim + asetpts=PTS-STARTPTS + adelay` 回位置
+   - `outa` = `mix_gated` + 所有 `orig_i` amix
+
+**关键工程细节**：
+
+- **`app://` protocol 特权声明必须早**（`app.whenReady` 之前）：`stream: true` 是视频 seek 能工作的
+  硬性条件；`standard: true` 后 host 名必须合法（用固定的 `local`）；Range Request 必须自己实现
+  （`net.fetch(file://…)` 不透传 Range，播几秒必炸 `PIPELINE_ERROR_DECODE`）
+- **`asetpts=PTS-STARTPTS` 是 atrim 后的必需**：抽出的音频片段保留原时间戳，不复位的话
+  `adelay` 位置翻倍
+- **`[0:a] asplit=N` 复用源音**：ffmpeg 不允许 pad 被多次消费；N 个 range + 可能的 bg 兜底都用源音
+  时必须先 asplit
+- **中心点判定策略**：`segmentInOriginalRanges(segCenter, ranges)` —— ASR 切句边界与用户手画 range
+  边界大概率不对齐，用 segment 中心时间落在 range 内判定，最鲁棒（策略 A "完全落在"太严；策略 C
+  "重叠比例"阈值难定）
+- **只失效 2 个 stage 的理由**：range 只影响音轨拼接 + 字幕，前面 ASR/翻译/TTS/align 完全不受影响；
+  改一次 range → 30 秒左右看到新片，不必等 10 分钟
+
 ---
 
 ## 4. 经验值与调参手册
@@ -352,6 +402,8 @@ SYSTEM_VOICES_MALE = ['male-qn-jingying', 'male-qn-qingse', 'male-qn-badao',
 | 短样本克隆质量仍受限 | 即使循环复制，4s 原样本 ×3 不如 30s 真样本 | v0.6 跨集音色资产库：积累多集样本一次性 30s+ 克隆 |
 | video-slow 真正生效需 ffmpeg setpts 切片 | 当前 align planner 标了 video-slow 但 mix-render 不真改画面速度 | v0.6 按 segment 切片做 setpts |
 | 工作台缩略图懒加载未完善 | 表格里的小缩略图显示占位文字 | v0.5.x 修 |
+| 保留原音 range 边界不做淡入淡出 | 极端情况衔接处可能有轻微 pop/click | 有反馈再加 `afade=t=in:d=0.01,afade=t=out:d=0.01` |
+| 保留原音 range 判定策略是"中心点" | 极短 range (< 一句 segment) 可能覆盖不到相邻的 segment | 目前实用够用；未来可考虑"重叠比例"混合策略 |
 
 ### 5.2 v0.6 路线
 
@@ -399,13 +451,16 @@ SYSTEM_VOICES_MALE = ['male-qn-jingying', 'male-qn-qingse', 'male-qn-badao',
 
 | 文件 | 职责 |
 |------|------|
-| `packages/core-types/src/api.ts` | IPC 通道契约（单一来源） |
+| `packages/core-types/src/api.ts` | IPC 通道契约（单一来源，含 v0.5 3 个 project:* 新通道） |
+| `apps/desktop/src/main/index.ts` | main 入口 + `app://` 协议（stream privilege + Range Request + 白名单）|
+| `apps/desktop/src/main/ipc/project.ts` | v0.5 `set-original-audio-ranges` / `register-source-preview` / `get-preprocess-meta` |
 | `apps/desktop/src/main/ipc/segment.ts` | `segment:assets` + `segment:resynth` |
 | `apps/desktop/src/main/ipc/system.ts` | `system:read-file-as-data-url` |
 | `apps/desktop/src/main/ipc/pipeline.ts` | `pipeline:start` / `retry-stage` / `reset-all` |
+| `apps/desktop/src/renderer/src/pages/Workbench.tsx` | 主页 + 4 tab（预处理 / 工作流 / 工作台 / 对齐） |
+| `apps/desktop/src/renderer/src/components/PreprocessPanel.tsx` | v0.5 保留原音预处理面板 |
 | `apps/desktop/src/renderer/src/components/Workstation.tsx` | 三段式导演工作台 |
 | `apps/desktop/src/renderer/src/components/AlignPanel.tsx` | 对齐策略可视化 |
-| `apps/desktop/src/renderer/src/pages/Workbench.tsx` | 主页 + 3 tab |
 
 ### Schema
 
@@ -444,9 +499,15 @@ K1-6 工作台 — 三段式 UI + 6 个新 IPC + 2 列 DB
 L1  克隆循环复制 — 替代静音 padding，避免发闷
 M1-3 LLM 多模态 + 视觉拆分 — ChatMessage 加 ContentBlock[]
 N1  视觉拆分覆盖率 — 全部 segments 送 LLM，不再 4 张采样
+O1  预处理 tab 骨架 — Workbench 4 tab（预处理/工作流/工作台/对齐）+ ProjectConfig.originalAudioRanges
+O2  app:// 协议改造 — registerSchemesAsPrivileged({stream, standard, secure}) + app://local/<path>
+O3  视频 Range Request — 手动解析 Range: bytes=X-Y，206 + Content-Range + createReadStream({start,end})
+O4  时间轴刷子 + 5 张缩略图 + 两端拖拽把手 + 帧对齐 + hover 提示
+O5  gate + refill filter graph — mix_pre volume=0 enable + [0:a] asplit+atrim+asetpts+adelay 回填
+O6  失效追踪 — set-original-audio-ranges 只清 subtitle-burn + mix-render 两个 stage
 ```
 
 ---
 
-**文档版本**：v0.5 / 2026-06-08
+**文档版本**：v0.5 / 2026-07-01
 **主要贡献者**：minimax · Claude Code

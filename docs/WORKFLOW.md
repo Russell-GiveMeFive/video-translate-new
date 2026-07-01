@@ -1,7 +1,7 @@
 # DramaPrime · 端到端工作流
 
-> **版本**：v0.4.13（与代码同步）
-> **日期**：2026-06-15
+> **版本**：v0.5（与代码同步）
+> **日期**：2026-07-01
 > **目标读者**：新加入的工程师 / 产品 / 客户
 >
 > 这份文档讲清楚「一段中文短剧输入后，DramaPrime 在内部都做了什么」。
@@ -31,6 +31,12 @@
 │ 创建项目 → 选源视频 → 选目标语种 →  选「有/无烧录中文字幕」  → ▶ 开始
 └─────────────────────────────────────────┘
                   ↓
+┌────────── [可选] 预处理 tab（v0.5 新增）─────────┐
+│ 在时间轴上用刷子画"保留原音"片段：这些段最终用      │
+│ 源视频完整音轨（BGM/音效/人声），且不显示字幕。    │
+│ 可随时增删改，只影响 subtitle-burn + mix-render。 │
+└────────────────────────────────────────────────┘
+                  ↓
 ┌──────────────────── 14 阶段 pipeline（自动串行）────────────────────┐
 │                                                                        │
 │  ① preprocess          抽 metadata + 5 张缩略图                          │
@@ -44,8 +50,9 @@
 │  ⑨ translate            MiniMax M3 batch 翻译（12 句/批）                │
 │  ⑩ tts-synth            MiniMax Speech-2.8 逐句合成 + loudnorm 归一化    │
 │  ⑪ align               SOLA 弹性变速，把 TTS 对齐原片时轴                 │
-│  ⑫ subtitle-burn       生成 ASS / SRT，ffmpeg 烧入                        │
+│  ⑫ subtitle-burn       生成 ASS / SRT，range 内跳过整句字幕（v0.5）      │
 │  ⑬ mix-render           ffmpeg filter_complex 混音 + 烧字幕 + 输出 mp4  │
+│                         range 内 gate + refill 用源音替换 TTS（v0.5）    │
 │  ⑭ finalize            写 manifest.json（产物清单 + 成本 + 时长）        │
 │                                                                        │
 └────────────────────────────────────────────────────────────────────────┘
@@ -183,6 +190,7 @@
 | 2. 写 ASS | 用 ffmpeg ass 滤镜烧录（可选双语，原片中文字幕可能被叠加） |
 | 3. wrap | `maxCharsPerLine=24` 自动折行（防止一句撑满两行） |
 | 4. 位置 | `bottomMarginRatio=0.06`（距底 6% = 1080p 下 115px）— 避开 home indicator |
+| 5. **v0.5 range 跳过** | 中心时间落在 `originalAudioRanges` 内的 segment，整句 cue 直接 skip |
 
 ### ⑬ mix-render（最终合成）
 
@@ -191,6 +199,12 @@ ffmpeg filter_complex 一次性合成：
 - 主音轨：TTS 拼接（按 segment startMs 偏移）
 - 背景音：`stems/accompaniment.wav`（demix 产物）或源音轨 -15dB 兜底
 - 字幕：烧入 / 软字幕
+
+**v0.5 保留原音 gate + refill**：
+- range 命中的 segment 从 mix 剔除（不用 srcAudioPath —— 那个只有 vocals 缺 BGM）
+- `mix_pre` 用 `volume=enable='between(t,S1,E1)+...':volume=0` 在 range 时间段静音
+- 每个 range → `[0:a] atrim + asetpts=PTS-STARTPTS + adelay` 抽出源视频完整音轨的对应片段回填
+- `mix_gated` + 所有 `orig_i` amix → `outa`
 
 输出 `out.mp4`（h264 + aac + faststart）。
 
@@ -267,6 +281,8 @@ out.mp4
 | tts-synth | MiniMax 1002 限流 | 指数退避 500/1500/4500ms × 3 + 段间 200ms throttle |
 | tts-synth | emotion=neutral 触发 2013 | 已删 neutral 映射（v0.4.12） |
 | align | SOLA 拉不动 | 回退视频慢放（±5%） → 红标 overflow |
+| subtitle-burn | 所有 segment 都被 range 覆盖 | `kind='skipped'`，不生成字幕（合成时 range 内本来就无字幕）|
+| mix-render | 所有 segment 都被 range 覆盖 | 退化为"复制原视频画面 + 原音"（`args = ['-i', src]`），自动正确 |
 | mix-render | ffmpeg 失败 | 60s watchdog abort + kind='failed' |
 
 ---
@@ -278,7 +294,10 @@ out.mp4
 | `apps/desktop/src/main/stages/<stage>.ts` | 14 阶段真实实现 |
 | `apps/desktop/src/main/providers/index.ts` | 4 个外部 Provider 注册（MiniMax LLM/TTS/Clone、volcengine ASR）|
 | `apps/desktop/src/main/orchestrator/index.ts` | 14 阶段 stage 注册 + 持久化数据库 |
-| `apps/desktop/src/renderer/src/pages/Workbench.tsx` | 概览页（实时进度 + 错误展示）|
+| `apps/desktop/src/main/index.ts` | app:// 协议 + Range Request + 白名单（v0.5）|
+| `apps/desktop/src/main/ipc/project.ts` | v0.5 set-original-audio-ranges / register-source-preview / get-preprocess-meta |
+| `apps/desktop/src/renderer/src/pages/Workbench.tsx` | 主页 + 4 tab（预处理 / 工作流 / 工作台 / 对齐）|
+| `apps/desktop/src/renderer/src/components/PreprocessPanel.tsx` | v0.5 保留原音预处理面板 |
 | `apps/desktop/src/renderer/src/components/Workstation.tsx` | 详情页（重合成单句）|
 | `apps/desktop/src/renderer/src/pages/Voices.tsx` | 跨项目音色库（v0.4.12）|
 | `apps/desktop/src/renderer/src/components/Toast.tsx` | 全局 toast + 系统气泡（v0.4.12）|
@@ -318,5 +337,6 @@ out.mp4
 
 - [`PRD.md`](./PRD.md) — 产品需求文档（含 D1-D13 决策、Roadmap、风险）
 - [`TDD.md`](./TDD.md) — 技术设计（IPC、SQLite DDL、Provider 抽象、Stage 接口）
-- [`TECH-OVERVIEW-v0.5.md`](./TECH-OVERVIEW-v0.5.md) — 早期整体概览（部分过时）
+- [`TECHNICAL-GUIDE.md`](./TECHNICAL-GUIDE.md) — 代码组织 + 开发规范 + v0.5 保留原音端到端参考
+- [`TECH-OVERVIEW-v0.5.md`](./TECH-OVERVIEW-v0.5.md) — 已落地实现总结（技术决策 + 修复日志）
 - [`../RUNBOOK.md`](../RUNBOOK.md) — 部署 + 排错
