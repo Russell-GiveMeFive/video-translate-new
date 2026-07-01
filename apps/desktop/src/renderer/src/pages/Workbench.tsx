@@ -11,6 +11,7 @@ import {
 import { AlignPanel } from '../components/AlignPanel.js'
 import { ArtifactsPanel } from '../components/ArtifactsPanel.js'
 import { Workstation } from '../components/Workstation.js'
+import { PreprocessPanel } from '../components/PreprocessPanel.js'
 import { toast } from '../components/Toast.js'  // v0.4.12 全局 toast
 
 const STAGE_LABEL: Record<StageName, string> = {
@@ -36,7 +37,7 @@ export function Workbench(): JSX.Element {
   const [status, setStatus] = useState<PipelineStatus | null>(null)
   const [progress, setProgress] = useState<{ stage: StageName; percent: number; message?: string } | null>(null)
   const [costCents, setCostCents] = useState(0)
-  const [tab, setTab] = useState<'overview' | 'workstation' | 'align'>('overview')
+  const [tab, setTab] = useState<'preprocess' | 'flow' | 'workstation' | 'align'>('preprocess')
   const [alignRefreshKey, setAlignRefreshKey] = useState(0)
   /** stage 失败时显示完整错误（最新的覆盖旧的；点 ▶ 开始时清空） */
   const [latestError, setLatestError] = useState<{
@@ -167,14 +168,24 @@ export function Workbench(): JSX.Element {
         {/* Tab 切换 */}
         <div className="mt-4 flex gap-4 border-b border-zinc-800 -mb-px">
           <button
-            onClick={() => setTab('overview')}
+            onClick={() => setTab('preprocess')}
             className={`pb-2 text-xs ${
-              tab === 'overview'
+              tab === 'preprocess'
                 ? 'border-b-2 border-indigo-400 text-indigo-300'
                 : 'text-zinc-500 hover:text-zinc-300'
             }`}
           >
-            概览
+            预处理
+          </button>
+          <button
+            onClick={() => setTab('flow')}
+            className={`pb-2 text-xs ${
+              tab === 'flow'
+                ? 'border-b-2 border-indigo-400 text-indigo-300'
+                : 'text-zinc-500 hover:text-zinc-300'
+            }`}
+          >
+            工作流
           </button>
           <button
             onClick={() => setTab('workstation')}
@@ -199,7 +210,9 @@ export function Workbench(): JSX.Element {
         </div>
       </header>
 
-      {tab === 'workstation' ? (
+      {tab === 'preprocess' ? (
+        <PreprocessPanel projectId={currentId} project={project} onProjectChange={setProject} />
+      ) : tab === 'workstation' ? (
         <Workstation projectId={currentId} refreshKey={alignRefreshKey} />
       ) : tab === 'align' ? (
         <AlignPanel projectId={currentId} refreshKey={alignRefreshKey} />

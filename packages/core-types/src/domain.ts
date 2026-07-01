@@ -76,6 +76,18 @@ export interface ProjectConfig {
     style?: SubtitleStyle
   }
   /**
+   * v0.5 "保留原音"时间范围：用户在预处理 tab 手画的片段列表。
+   *
+   * 语义：范围内的原视频音轨**完全替换**掉 TTS 产物（mix-render 里 mute TTS、回填源音）；
+   * 范围内的字幕整句跳过（subtitle-burn 里 skip cue）。
+   *
+   * 优先级低于 segment.useOriginalAudio（工作台勾的），高于 character.useOriginalAudio。
+   * 判断依据：segment 中心时间 (startMs+endMs)/2 落在任一 range 内 → 使用原音。
+   *
+   * 缺省 = 空数组（老 project 不受影响）。改动后 mix-render / subtitle-burn 自动失效可重跑。
+   */
+  originalAudioRanges?: OriginalAudioRange[]
+  /**
    * v0.4.9 VLM OCR 字幕识别（识别原片烧录中文字幕的真实时间轴，重切 segment）。
    *
    * ⚠️ v0.5 状态：**VLM OCR 已全局禁用**，stage 顶部无条件 skipped → 走 ASR。
@@ -107,6 +119,19 @@ export interface SubtitleStyle {
   outlineColor: string
   outlineWidth: number
   bottomMarginPx: number
+}
+
+/**
+ * v0.5 用户在"预处理"tab 画的单个"保留原音"片段。
+ *   - id：uuid，UI 定位删除用
+ *   - startMs / endMs：毫秒时间戳（endMs 独占，startMs <= endMs）
+ *   - note：可选备注，UI 展示（如"打斗场景"、"背景笑声"）
+ */
+export interface OriginalAudioRange {
+  id: string
+  startMs: number
+  endMs: number
+  note?: string
 }
 
 /**

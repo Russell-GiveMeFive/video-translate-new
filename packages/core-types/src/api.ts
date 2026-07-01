@@ -18,6 +18,7 @@ import type {
   BatchEnqueueInput,
   BatchStatus,
   BatchId,
+  OriginalAudioRange,
 } from './domain.js'
 import type { NormalizedError } from './errors.js'
 
@@ -68,6 +69,35 @@ export type ApiSurface = {
   'project:duplicate': (id: ProjectId) => Promise<ProjectId>
   'project:import': (path: string) => Promise<ProjectId>
   'project:export': (input: { id: ProjectId; output: string }) => Promise<void>
+  /**
+   * v0.5 更新"保留原音"时间范围（预处理 tab 用）。
+   * 落库后自动清掉 mix-render + subtitle-burn 的 done 状态，工作台会看到它们变 pending 可重跑。
+   */
+  'project:set-original-audio-ranges': (input: {
+    id: ProjectId
+    ranges: OriginalAudioRange[]
+  }) => Promise<void>
+  /**
+   * v0.5 让 renderer 播源视频：把源视频路径加入 app:// 白名单，返回可播 URL
+   * 每次切项目 renderer 都要调一次；main 保证 ALLOWED_ROOTS 只留最新那个源。
+   */
+  'project:register-source-preview': (input: {
+    id: ProjectId
+  }) => Promise<{ url: string }>
+  /**
+   * v0.5 读 preprocess/metadata.json + 缩略图 URL 列表 —— 给预处理 tab。
+   * 未跑过 preprocess 时返回 null（预处理 tab 会退化到 ms-only 显示、无缩略图背景）。
+   * thumbnails：按视频比例位置顺序，5 张缩略图的 app:// URL（0.05 / 0.25 / 0.5 / 0.75 / 0.95）。
+   */
+  'project:get-preprocess-meta': (input: {
+    id: ProjectId
+  }) => Promise<{
+    fps: number
+    width: number
+    height: number
+    durationMs: number
+    thumbnails: string[]
+  } | null>
 
   // ---- pipeline ----
   'pipeline:start': (input: { projectId: ProjectId; resumeFrom?: StageName }) => Promise<{
