@@ -78,15 +78,25 @@ export interface ProjectConfig {
   /**
    * v0.4.9 VLM OCR 字幕识别（识别原片烧录中文字幕的真实时间轴，重切 segment）。
    *
-   * 用户在创建项目时手动指定：
-   *   - hasBurnedInSubtitles=true：原片有烧录中文字幕，跑 VLM OCR 提升字幕对齐
-   *   - hasBurnedInSubtitles=false：原片无字幕（如纯对白短剧），跳过 OCR 直接用 ASR
+   * ⚠️ v0.5 状态：**VLM OCR 已全局禁用**，stage 顶部无条件 skipped → 走 ASR。
+   *   决策原因详见 `vlm-ocr-stage.ts` 顶部注释。
+   *   下面两个字段保留为元信息 / 老 project 兼容，不再驱动行为。
+   *   未来若 OCR 精度提升或换 provider 想重启，删除 stage 那段 return 即可恢复语义。
    *
-   * 默认 true：大部分短剧原片都有烧录字幕；用户实测无字幕的项目里再关掉，省 ~$1/单片成本。
+   * 字段语义（历史保留）：
+   *
+   * 1. hasBurnedInSubtitles（视频属性，仍可能被字幕烧录等其他 stage 用）：
+   *    - true：原片有烧录中文字幕
+   *    - false：原片无字幕（如纯对白短剧）
+   *
+   * 2. strategy（已弃用 deprecated）：
+   *    - 'vlm' / 'asr'：原本用来选 OCR 策略；现在 stage 不再读它
    */
   ocr: {
-    /** 原片是否有烧录中文字幕 */
+    /** 原片是否有烧录中文字幕（视频属性元信息） */
     hasBurnedInSubtitles: boolean
+    /** @deprecated v0.5 VLM OCR 已全局禁用；字段保留仅为老 project 兼容 */
+    strategy?: 'vlm' | 'asr'
   }
 }
 

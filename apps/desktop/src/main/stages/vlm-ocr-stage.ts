@@ -1,7 +1,8 @@
 import { existsSync } from 'node:fs'
 import { mkdir, readFile, readdir, unlink, rm } from 'node:fs/promises'
 import { join } from 'node:path'
-import type { Stage, StageRunContext, StageResult, ChatMessage } from '@dramaprime/core-types'
+import type { Stage, StageRunContext, StageResult, ChatMessage, ChatInput } from '@dramaprime/core-types'
+import { isAppError } from '@dramaprime/core-types'
 import { providers } from '../providers/index.js'
 import { ProjectRepo } from '../storage/project-repo.js'
 import { SegmentRepo } from '../storage/segment-repo.js'
@@ -33,6 +34,26 @@ export const vlmOcrStage: Stage = {
   kind: 'provider',
 
   async run(ctx: StageRunContext): Promise<StageResult> {
+    // ★ v0.5 全局禁用 VLM OCR
+    //
+    // 决策原因（写给未来想重新启用的人）：
+    //   - M3 VLM 对"画面文字 vs 字幕"区分能力不稳定，会把招牌/手机屏/品牌 logo
+    //     等也识别为字幕，污染时间轴；强化 prompt + post-filter 后仍不够干净
+    //   - VLM OCR 翻车时本就走 ASR 兜底，干脆默认全 ASR 更稳
+    //   - 调用成本 + 1026 内容审核拒绝在短剧场景命中率较高，性价比拉胯
+    //
+    // 保留的设计资产（重启时直接放开下面 return 即可恢复）：
+    //   - prompt 工程：字幕判定特征 + 9 类反例（vlm-ocr-stage.ts:340-380）
+    //   - 1026 内容审核处理 + 阈值早退
+    //   - trace 日志（requestId / 耗时 / sensitiveContentIndex）
+    //   - hasBurnedInSubtitles flag 仍在 domain.ts，未来想按视频属性条件启用
+    //
+    // 保留 stage 名称"OCR 辅助"在 pipeline UI 上作为占位，给用户视觉一致性。
+    ctx.logger.info('VLM OCR 已全局禁用，沿用 ASR 切句（v0.5 决策）')
+    return { kind: 'skipped', reason: 'VLM OCR 已禁用，沿用 ASR 切句' }
+
+    // ─── 以下代码保留但不执行；将来想启用 OCR 时删掉上面 return 即可 ───
+    // eslint-disable-next-line no-unreachable
     const t0 = Date.now()
     const project = ProjectRepo.get(ctx.projectId as any)
     if (!existsSync(project.sourcePath)) {
@@ -44,6 +65,14 @@ export const vlmOcrStage: Stage = {
     if (project.config.ocr?.hasBurnedInSubtitles === false) {
       ctx.logger.info('用户明确指定原片无烧录字幕，跳过 VLM OCR')
       return { kind: 'skipped', reason: '用户指定原片无烧录字幕，沿用 ASR 切句' }
+    }
+
+    // ★ v0.5 用户偏好 ASR 兜底策略 → 跳过 VLM OCR
+    // 跟 hasBurnedInSubtitles 是独立维度：前者是"视频有没有字幕"，这里是"想不想跑 VLM"
+    // 用户场景：赶时间 / 省成本 / 上次 VLM 翻车想换个策略试试
+    if (project.config.ocr?.strategy === 'asr') {
+      ctx.logger.info('用户选择 ASR 策略，跳过 VLM OCR')
+      return { kind: 'skipped', reason: '用户选择 ASR 策略，沿用 ASR 切句' }
     }
 
     // ── Step 1: 抽帧（VLM_OCR_CONFIG.framesPerSecond）──────────────────
@@ -115,6 +144,11 @@ export const vlmOcrStage: Stage = {
     const frameResults: FrameOcrResult[] = new Array(frameFiles.length)
     let completed = 0
     let earlyExitTriggered = false
+    // v0.5 敏感内容计数（1026 / new_sensitive）：累计达阈值整 stage 早退
+    // 短剧场景如果命中大量敏感画面，继续跑只是浪费 60s 预算
+    let sensitiveCount = 0
+    const SENSITIVE_ABORT_THRESHOLD = 10 // 累计 ≥10 帧敏感 → 早退
+    const SENSITIVE_RATIO_THRESHOLD = 0.4 // 或者 已处理帧中 ≥40% 敏感 → 早退（前提至少 5 帧）
 
     const processFrame = async (i: number): Promise<void> => {
       if (combinedSignal.aborted || earlyExitTriggered) {
@@ -124,12 +158,31 @@ export const vlmOcrStage: Stage = {
       const frameFile = frameFiles[i]!
       const framePath = join(framesDir, frameFile)
       const tsMs = Math.round((i / fps) * 1000)
+      // v0.5 trace 钩子：每次 M3 调用的 start/end 都打日志，含 requestId/url/耗时
+      // 全量打（用户 A 方案），让 60s 内究竟有没有调 M3 一目了然
+      const traceLogger: ChatInput['traceLogger'] = (ev) => {
+        const fn = ev.level === 'error' ? ctx.logger.error : ev.level === 'warn' ? ctx.logger.warn : ctx.logger.info
+        fn.call(ctx.logger, `M3 ${ev.kind}`, { ...ev, frame: frameFile, frameIdx: i })
+      }
       try {
-        const ocrText = await ocrFrameWithVlm(framePath, llm, combinedSignal)
+        const ocrText = await ocrFrameWithVlm(framePath, llm, combinedSignal, traceLogger)
         frameResults[i] = { tsMs, text: ocrText, skipped: false }
       } catch (err) {
         if (combinedSignal.aborted) {
           frameResults[i] = { tsMs, text: '', skipped: true }
+          return
+        }
+        // v0.5 区分 1026 内容审核拒绝：这是永久错误，不应该再重试，也别污染普通失败日志
+        if (isAppError(err) && err.code === 'provider.content-sensitive') {
+          sensitiveCount++
+          frameResults[i] = { tsMs, text: '', skipped: false }
+          if (sensitiveCount % 5 === 1) {
+            // 别每帧都刷日志，每 5 帧打一条
+            ctx.logger.info('单帧 VLM 命中内容审核（1026），跳过', {
+              frame: frameFile,
+              sensitiveCount,
+            })
+          }
           return
         }
         ctx.logger.warn('单帧 VLM OCR 失败，跳过', {
@@ -156,6 +209,20 @@ export const vlmOcrStage: Stage = {
       const promises: Promise<void>[] = []
       for (let i = batchStart; i < batchEnd; i++) promises.push(processFrame(i))
       await Promise.all(promises)
+
+      // v0.5 敏感内容阈值早退：累计/比例任一达标 → 整 stage 早退，避免烧完 60s 预算
+      if (
+        sensitiveCount >= SENSITIVE_ABORT_THRESHOLD ||
+        (completed >= 5 && sensitiveCount / completed >= SENSITIVE_RATIO_THRESHOLD)
+      ) {
+        ctx.logger.warn('VLM 内容审核拒绝率过高，触发早退', {
+          sensitiveCount,
+          processed: completed,
+          ratio: (sensitiveCount / completed).toFixed(2),
+        })
+        earlyExitTriggered = true
+        break
+      }
 
       // 早退检查：前 10 帧全空 → VLM 大概率不工作（或视频无烧录字幕），放弃整个 stage
       if (batchStart === 0 && batchEnd >= 10) {
@@ -242,10 +309,13 @@ const VLM_OCR_CONFIG = {
   /** 抽帧密度（fps）—— v0.4.23 提到 3 fps（每秒 3 帧）增强短字幕捕捉
    *  代价：VLM 调用量翻倍（成本 / 时间），收益：0.3-0.5s 闪现字幕识别率提升 */
   framesPerSecond: 3,
-  /** VLM 并发数：客户机器跑 4 路通常稳，再多容易触发 rate limit */
-  concurrency: 4,
-  /** 全局超时（ms）：超时直接走 ASR 兜底，避免 VLM 慢导致整个 pipeline 死 */
-  globalTimeoutMs: 60_000,
+  /** VLM 并发数：v0.5 提到 16（M3 服务端 rate limit 通常能扛住，慢请求时高并发能压满）
+   *  注意：太高可能触发 429，监控日志里 provider.rate-limited 频次 */
+  concurrency: 16,
+  /** 全局超时（ms）：v0.5 提到 180s
+   *  之前 60s 在 M3 慢响应 + 高并发场景仍可能不够；提到 3 分钟让大部分场景跑完
+   *  超时直接走 ASR 兜底 */
+  globalTimeoutMs: 180_000,
 }
 
 // ─── 类型 ──────────────────────────────────────────────────────────
@@ -279,7 +349,8 @@ interface OcrSegment {
 const ocrFrameWithVlm = async (
   framePath: string,
   llm: ReturnType<typeof providers>['llm'],
-  signal?: AbortSignal,
+  signal: AbortSignal | undefined,
+  traceLogger: ChatInput['traceLogger'],
 ): Promise<string> => {
   const imageData = await readFile(framePath)
   const base64 = imageData.toString('base64')
@@ -298,14 +369,32 @@ const ocrFrameWithVlm = async (
         },
         {
           type: 'text',
-          text: `请仅识别这张画面**底部位置**的中文字幕（不是画面中其他位置的招牌、屏幕文字等）。
+          text: `任务：识别这张视频画面里的**剧情对白字幕**（演员台词/旁白的烧录文字）。
 
-输出要求：
-- 如果底部有字幕：直接返回字幕原文，不加任何解释和引号
-- 如果底部没字幕：返回空字符串
-- 字幕中的标点（。！？）保留原样
+**字幕的判定特征**（必须全部满足才算字幕）：
+1. 位置：**画面底部** 5%-25% 的水平条带区域
+2. 样式：白色/浅色字体 + 黑色描边 或 半透明黑底白字
+3. 内容：是**演员说的话**或旁白（对白、独白、感叹），不是名词/标签/品牌
+4. 形态：单行或两行（中英双语时），居中对齐
 
-只返回字幕文本本身，不要"画面显示..."这种描述话。`,
+**以下都不是字幕，必须忽略**（即使画面里有文字也不要识别）：
+- 画面顶部/侧边的**台标/水印**（如"芒果TV"、"优酷"、剧名）
+- 招牌/路标/店名（如"XX公司"、"派出所"、"地铁站")
+- 手机屏幕里的文字（聊天记录、APP 界面、通话名字）
+- 电脑/电视屏幕内的文字
+- 印刷品（书本、报纸、合同、菜单）
+- 衣服/物品上的 logo / 文字
+- 弹幕、表情包文字
+- 角色心理活动用的**画面中央大字**（如"三年后"、"震惊"）
+- 转场/标题卡里的文字
+- 时间日期戳
+
+**输出规则**：
+- 底部有真字幕：直接返回字幕原文（保留标点 。！？），不加引号/解释
+- 底部没字幕 或 底部文字属于上述忽略列表：返回空字符串
+- 拿不准是字幕还是画面文字时：**倾向返回空字符串**（宁缺毋滥）
+
+只返回字幕文本本身或空字符串，不要任何说明文字。`,
         },
       ],
     },
@@ -317,6 +406,7 @@ const ocrFrameWithVlm = async (
     maxTokens: 256,
     temperature: 0.1, // 低温度 → 更稳定的 OCR 输出
     signal,
+    traceLogger,
   })
 
   // 清理：去掉可能的引号、前缀、空格
@@ -324,7 +414,68 @@ const ocrFrameWithVlm = async (
   text = text.replace(/^["「『"]+|["」』"]+$/g, '').trim()
   text = text.replace(/^字幕[:：]?\s*/, '').trim()
   if (text === '空' || text === '无' || text === '没有字幕') return ''
+
+  // v0.5 防御性 post-filter：M3 即便被 prompt 约束，仍偶尔会把画面文字误识为字幕。
+  // 用启发式规则把明显的"非字幕"过滤掉——宁缺毋滥
+  if (isLikelyNonSubtitleText(text)) return ''
+
   return text
+}
+
+/**
+ * v0.5 启发式过滤：判断 M3 返回的文本是不是"明显的非字幕"。
+ *
+ * 规则按短剧场景的常见误识模式定的：
+ *   - 纯英文/纯品牌名（"Apple"、"COCA-COLA"、"XYZ Company"）通常是 logo
+ *   - 时间日期戳（"2026.01.15"、"08:30"）通常是画面时间显示
+ *   - 极短的纯数字（"123"、"888"）通常是楼号/门牌
+ *   - 含明显"非台词"关键词（"XX公司"、"派出所"、"医院"、"地铁站"等）
+ *   - 极短（≤1 个汉字）几乎不可能是有意义的字幕
+ */
+const isLikelyNonSubtitleText = (text: string): boolean => {
+  const t = text.trim()
+  if (!t) return true
+
+  // 极短文本：1 个汉字以下（含数字/字母）通常是误识
+  if (t.length <= 1) return true
+
+  // 纯英文/数字/标点（短剧字幕几乎全是中文）
+  if (/^[A-Za-z0-9\s\-_.,!?'"()&/]+$/.test(t)) return true
+
+  // 时间戳/日期格式
+  if (/^\d{1,4}[年./:\-]\d{1,2}([月./:\-]\d{1,2})?$/.test(t)) return true
+  if (/^\d{1,2}:\d{2}(:\d{2})?$/.test(t)) return true
+
+  // 含明显"非台词"机构/场所关键词（出现就疑似招牌/标签）
+  const NON_SUBTITLE_KEYWORDS = [
+    '公司',
+    '集团',
+    '有限',
+    '股份',
+    '派出所',
+    '警察局',
+    '医院',
+    '地铁',
+    '机场',
+    '车站',
+    '酒店',
+    '宾馆',
+    '银行',
+    '商场',
+    '超市',
+    '芒果TV',
+    '优酷',
+    '爱奇艺',
+    '腾讯视频',
+    'B站',
+  ]
+  // 但是这类关键词在台词里也可能出现（"我去过这家公司"），所以加判断：
+  // 整段文本**短且主要由该关键词构成** → 大概率是招牌
+  for (const kw of NON_SUBTITLE_KEYWORDS) {
+    if (t.includes(kw) && t.length <= kw.length + 4) return true
+  }
+
+  return false
 }
 
 /**
