@@ -31,14 +31,15 @@ asarUnpack:
   - 'node_modules/@ffmpeg-installer/**'
   - 'node_modules/@ffprobe-installer/**'
 extraResources:
-  - from: ../../binaries/ffmpeg/${os}-${arch}
-    to: binaries/ffmpeg
-    filter: ['**/*']
+  # v0.5: ffmpeg 走 npm 包 @ffmpeg-installer / @ffprobe-installer（见上面 asarUnpack）
+  #        binaries/ffmpeg/* 三个目录是空的历史配置，不再需要
+  # sidecar 目录暂时空（v0.6+ Python sidecar 用），保留 extraResources 但可能被 electron-builder 忽略
   - from: ../../binaries/sidecar/${os}-${arch}
     to: binaries/sidecar
     filter: ['**/*']
-  # v0.6+ demucs standalone binary（PyInstaller 打包）
+  # demucs standalone binary（PyInstaller 打包）
   # 路径形如 binaries/demucs/darwin-arm64/demucs；packaging/demucs/build.sh 产出
+  # ${os} 在 electron-builder 里展开为 mac/win，用符号链接 mac-arm64 → darwin-arm64 兼容
   - from: ../../binaries/demucs/${os}-${arch}
     to: binaries/demucs/${os}-${arch}
     filter: ['**/*']
@@ -50,9 +51,11 @@ mac:
   notarize: false
   entitlements: build/entitlements.mac.plist
   entitlementsInherit: build/entitlements.mac.plist
+  # v0.5: 只出 arm64（Apple Silicon）—— demucs binary 只有 arm64 版本
+  #        Intel Mac 需要单独打包（先补 binaries/demucs/darwin-x64 再改 universal）
   target:
     - target: dmg
-      arch: universal
+      arch: arm64
   artifactName: ${productName}-${version}-${arch}.${ext}
 
 win:
