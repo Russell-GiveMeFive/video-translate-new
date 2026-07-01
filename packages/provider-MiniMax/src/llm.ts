@@ -24,10 +24,13 @@ export class MiniMaxLlmProvider implements LlmProvider {
   async chat(input: ChatInput): Promise<ChatOutput> {
     const { system, messages } = splitSystemMessage(input.messages)
 
+    const model = input.model ?? 'MiniMax-M3'
+    const maxTokens = input.maxTokens ?? 131072
     const body: Record<string, unknown> = {
-      model: input.model ?? 'MiniMax-M3',
+      model,
       messages,
-      max_tokens: input.maxTokens ?? 4096,
+      // M3 官方推荐 131072 (128K)；具体调用点可按场景在 ChatInput 中覆盖（如 OCR=256）
+      max_tokens: maxTokens,
       temperature: input.temperature ?? 0.6,
       stream: false,
       // 翻译任务关闭 thinking：节省延迟和 token
@@ -41,7 +44,27 @@ export class MiniMaxLlmProvider implements LlmProvider {
       () => controller.abort(),
       this.cfg.timeoutMs ?? MINIMAX_DEFAULT_TIMEOUT_MS,
     )
-    input.signal?.addEventListener('abort', () => controller.abort())
+    // v0.5 修 listener 泄漏：之前 addEventListener 没 remove，外层 signal 被 N 个 chat 共享时
+    // 监听器无限累积，触发 Node MaxListenersExceededWarning（且大量调用时真泄漏）
+    const onExternalAbort = () => controller.abort()
+    input.signal?.addEventListener('abort', onExternalAbort, { once: true })
+
+    // v0.5 trace 日志：请求开始时打一条；完成（成功 or 失败）后再打一条
+    const hasImages = messages.some(
+      (m) =>
+        Array.isArray(m.content) && m.content.some((b) => b.type === 'image'),
+    )
+    input.traceLogger?.({
+      kind: 'request-start',
+      level: 'info',
+      provider: this.name,
+      model,
+      url,
+      messageCount: messages.length,
+      hasImages,
+      maxTokens,
+    })
+    const startedAt = Date.now()
 
     try {
       const res = await fetch(url, {
@@ -56,6 +79,19 @@ export class MiniMaxLlmProvider implements LlmProvider {
       const data = (await res.json()) as AnthropicResponse
       const text = extractText(data)
       const usage = data.usage ?? { input_tokens: 0, output_tokens: 0 }
+      input.traceLogger?.({
+        kind: 'request-end',
+        level: 'info',
+        provider: this.name,
+        model,
+        url,
+        durationMs: Date.now() - startedAt,
+        status: 'ok',
+        httpStatus: res.status,
+        requestId: data.id,
+        promptTokens: usage.input_tokens,
+        completionTokens: usage.output_tokens,
+      })
       return {
         text,
         usage: {
@@ -69,8 +105,27 @@ export class MiniMaxLlmProvider implements LlmProvider {
         ),
         requestId: data.id,
       }
+    } catch (err) {
+      const appErr = err as Partial<AppError>
+      input.traceLogger?.({
+        kind: 'request-end',
+        level: 'warn',
+        provider: this.name,
+        model,
+        url,
+        durationMs: Date.now() - startedAt,
+        status: 'error',
+        httpStatus: (appErr.context as any)?.status,
+        requestId: (appErr.context as any)?.requestId,
+        errorCode: appErr.code,
+        errorMessage:
+          appErr.message ?? (err instanceof Error ? err.message : String(err)),
+        sensitiveContentIndex: (appErr.context as any)?.sensitiveContentIndex,
+      })
+      throw err
     } finally {
       clearTimeout(timer)
+      input.signal?.removeEventListener('abort', onExternalAbort)
     }
   }
 
@@ -152,6 +207,22 @@ const estimateLlmCost = (model: string, promptTokens: number, completionTokens: 
 }
 
 const mapHttpError = (status: number, body: string): AppError => {
+  // v0.5 抠出错误响应里的 request_id（M3 错误 body 形如 `"request_id":"0693..."`）
+  const requestIdMatch = body.match(/"request_id"\s*:\s*"([^"]+)"/)
+  const requestId = requestIdMatch?.[1]
+  // v0.5 优先识别 1026 内容审核拒绝（短剧场景高频）
+  // body 形如：{"type":"error","error":{"type":"api_error","message":"input new_sensitive, messages[0]'s content[2] image is sensitive, please check your input (1026)"}}
+  if (/\b1026\b|new_sensitive|is sensitive/i.test(body)) {
+    // 解析敏感图索引：messages[M]'s content[N]，多图请求时让调用方知道剔除哪张
+    const idxMatch = body.match(/content\[(\d+)\]/)
+    const sensitiveContentIndex = idxMatch ? Number(idxMatch[1]) : undefined
+    return new AppError({
+      code: 'provider.content-sensitive',
+      message: `MiniMax LLM 内容审核拒绝 (1026)：${body.slice(0, 200)}`,
+      retriable: false, // 重试还是会被拒；调用方应跳过/剔除
+      context: { status, sensitiveContentIndex, requestId },
+    })
+  }
   const code =
     status === 401 || status === 403
       ? ('provider.unauthorized' as const)
@@ -166,6 +237,6 @@ const mapHttpError = (status: number, body: string): AppError => {
     code,
     message: `MiniMax LLM HTTP ${status}: ${body.slice(0, 300)}`,
     retriable: code === 'provider.rate-limited' || code === 'provider.upstream-5xx',
-    context: { status },
+    context: { status, requestId },
   })
 }

@@ -40,7 +40,48 @@ export interface ChatInput {
   maxTokens?: number
   expectJson?: boolean
   signal?: AbortSignal
+  /**
+   * v0.5 trace 日志钩子：每次 HTTP 请求开始/完成都会调一次，让上层把 requestId/耗时/URL
+   * 接进自己的日志系统（pino/console/etc）。可选——不传时 provider 静默。
+   *
+   * 推荐用法：
+   *   traceLogger: (event) => logger[event.level]({...event, stage:'ocr-assist'})
+   */
+  traceLogger?: (event: LlmTraceEvent) => void
 }
+
+/** v0.5 LLM 调用的可观测性事件（provider 在请求开始/完成时各发一次） */
+export type LlmTraceEvent =
+  | {
+      kind: 'request-start'
+      level: 'info'
+      provider: string
+      model: string
+      url: string
+      messageCount: number
+      hasImages: boolean
+      maxTokens: number
+    }
+  | {
+      kind: 'request-end'
+      level: 'info' | 'warn' | 'error'
+      provider: string
+      model: string
+      url: string
+      durationMs: number
+      status: 'ok' | 'error'
+      httpStatus?: number
+      /** 成功响应里的 message.id（M3 形如 "066a..."）或错误 body 里抠出的 request_id */
+      requestId?: string
+      /** 错误情况下的错误码与简要 message */
+      errorCode?: string
+      errorMessage?: string
+      /** 1026 多图请求时，敏感图在 content 数组中的索引 */
+      sensitiveContentIndex?: number
+      /** 成功时的 token 用量 */
+      promptTokens?: number
+      completionTokens?: number
+    }
 
 export interface ChatOutput {
   text: string

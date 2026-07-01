@@ -35,3 +35,4 @@ binaries/sidecar/
 # IDE
 .vscode/
 .idea/
+binaries/

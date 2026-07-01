@@ -7,6 +7,12 @@ export type ErrorCode =
   | 'provider.bad-request'
   | 'provider.upstream-5xx'
   | 'provider.network'
+  /**
+   * v0.5 内容审核拒绝（MiniMax 1026 / new_sensitive）：
+   * 永久不可恢复错误，调用方应跳过当前帧/图片而非重试。
+   * context 可携带 sensitiveImageIndex（多图请求时指明哪张敏感）。
+   */
+  | 'provider.content-sensitive'
   // sidecar 类
   | 'sidecar.crashed'
   | 'sidecar.method-not-found'

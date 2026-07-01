@@ -278,7 +278,15 @@ export const clusterStage: Stage = {
     // 视觉辅助拆分：对每个 speaker_id（segments >= 2）调 LLM Vision 判断
     // 是否实际是多个外貌不同的人（比如兄弟脸辨识、长相相近的角色）。
     // 拆完后的 sub-group 在后续步骤里被当成不同的 character。
-    const splitMap = new Map<string, { label: string; segIds: Set<string> }[]>()
+    // v0.5 命名升级：splitMap 同时携带 gender/role/name，给 composeCharacterName 用
+    interface SplitInfo {
+      label: string
+      segIds: Set<string>
+      gender: '男' | '女' | null
+      role: string | null
+      name: string | null
+    }
+    const splitMap = new Map<string, SplitInfo[]>()
     for (const [speakerId, ss] of bySpeaker.entries()) {
       if (ss.length < 2) continue // 1 句没必要调 vision
       ctx.reportProgress(
@@ -294,13 +302,25 @@ export const clusterStage: Stage = {
         })
         splitMap.set(
           speakerId,
-          split.map((g) => ({ label: g.label, segIds: new Set(g.segmentIds) })),
+          split.map((g) => ({
+            label: g.label,
+            segIds: new Set(g.segmentIds),
+            gender: g.gender ?? null,
+            role: g.role ?? null,
+            name: g.name ?? null,
+          })),
         )
       } else if (split && split.length === 1) {
         // v0.4.15 视觉拆分返回 1 组（M3 判断"是同一个人"）→ 也存 label
         // 让 fallback 路径用 M3 描述（"黑发深蓝外套青年"）而不是"角色 1"
         splitMap.set(speakerId, [
-          { label: split[0]!.label, segIds: new Set(split[0]!.segmentIds) },
+          {
+            label: split[0]!.label,
+            segIds: new Set(split[0]!.segmentIds),
+            gender: split[0]!.gender ?? null,
+            role: split[0]!.role ?? null,
+            name: split[0]!.name ?? null,
+          },
         ])
         ctx.logger.info('视觉拆分：LLM 认为是同一个人，保留 label 给 fallback', {
           speakerId,
@@ -317,11 +337,16 @@ export const clusterStage: Stage = {
       const split = await trySplitSpeakerByVisual(ctx, speakerId, ss)
       // 1 组也接受（M3 觉得是同一人、给外观描述就够了）
       if (split && split.length >= 1) {
-        const label = split[0]!.label
         splitMap.set(speakerId, [
-          { label, segIds: new Set(split[0]!.segmentIds) },
+          {
+            label: split[0]!.label,
+            segIds: new Set(split[0]!.segmentIds),
+            gender: split[0]!.gender ?? null,
+            role: split[0]!.role ?? null,
+            name: split[0]!.name ?? null,
+          },
         ])
-        ctx.logger.info('补调拿到 label', { speakerId, label })
+        ctx.logger.info('补调拿到 label', { speakerId, label: split[0]!.label })
       }
     }
 
@@ -329,7 +354,8 @@ export const clusterStage: Stage = {
 
     const genderBySpeaker = speakerGenderHint.get(ctx.projectId) ?? new Map()
 
-    let n = 0
+    // v0.5 命名升级：分性别独立计数（"男1/男2... 女1/女2..."），未知性别用全局计数
+    const counters = { 男: 0, 女: 0, 未知: 0 }
     const characters: Array<{ characterId: string; speakerId: string }> = []
     for (const [speakerId, ss] of bySpeaker.entries()) {
       const inferredGender = genderBySpeaker.get(speakerId) ?? null
@@ -344,12 +370,21 @@ export const clusterStage: Stage = {
           const characterId = randomUUID()
           const totalDurMs = grpSegs.reduce((acc, s) => acc + (s.endMs - s.startMs), 0)
           const subSpeakerId = `${speakerId}-${gi}` // 派生 id 让 character.speakerId 唯一
+          // 合并 ASR gender hint 和 LLM gender，LLM 优先（LLM 同时看脸+台词）
+          const finalGender = grp.gender ?? inferredGender ?? null
+          const charName = composeCharacterName({
+            gender: finalGender,
+            role: grp.role,
+            name: grp.name,
+            label: grp.label,
+            counters,
+          })
           CharacterRepo.insert({
             id: characterId,
             projectId: ctx.projectId as any,
-            name: `角色 ${++n} (${grp.label})`,
+            name: charName,
             speakerId: subSpeakerId,
-            gender: inferredGender,
+            gender: finalGender,
             ageBand: null,
             sampleScore: Math.min(1, totalDurMs / 30_000),
             sampleDurMs: totalDurMs,
@@ -366,11 +401,16 @@ export const clusterStage: Stage = {
         }
       } else {
         // 没拆分：原 speaker = 1 个 character
-        // v0.4.15 优先用 M3 视觉描述（"黑发深蓝外套青年"），无 label 时 fallback "角色 N"
-        const visLabel = splitGroups?.[0]?.label
-        const charName = visLabel
-          ? `角色 ${++n} (${visLabel})`
-          : `角色 ${++n}`
+        // v0.5 优先用 M3 命名（性别+称谓-人名），无命名信息时 fallback 到外观描述
+        const grp = splitGroups?.[0]
+        const finalGender = grp?.gender ?? inferredGender ?? null
+        const charName = composeCharacterName({
+          gender: finalGender,
+          role: grp?.role ?? null,
+          name: grp?.name ?? null,
+          label: grp?.label ?? null,
+          counters,
+        })
         const characterId = randomUUID()
         const totalDurMs = ss.reduce((acc, s) => acc + (s.endMs - s.startMs), 0)
         CharacterRepo.insert({
@@ -378,7 +418,7 @@ export const clusterStage: Stage = {
           projectId: ctx.projectId as any,
           name: charName,
           speakerId,
-          gender: inferredGender,
+          gender: finalGender,
           ageBand: null,
           sampleScore: Math.min(1, totalDurMs / 30_000),
           sampleDurMs: totalDurMs,
@@ -403,6 +443,50 @@ export const clusterStage: Stage = {
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────
+
+/**
+ * v0.5 命名升级：根据 LLM Vision 返回的 gender/role/name 拼出 character 显示名。
+ *
+ * 命名风格（用户选 Q2:c）：性别+序号-称谓-人名，例：
+ *   - 女2-妹妹-小芸
+ *   - 男1-老板-王总
+ *   - 男3-旁白          （没人名就省略 -name 部分）
+ *   - 女1               （什么都没挖出来时极简兜底）
+ *
+ * Fallback（用户选 Q3:a）：name + role 都为 null（M3 没挖出来）时，
+ * 回退到旧逻辑 `角色 N (外观描述)`，其中"外观描述"用 label。
+ *
+ * @param input.gender '男' | '女' | null  — LLM 命名优先，ASR gender hint 兜底
+ * @param input.role   角色称谓/身份，如 "妹妹"/"老板"/"旁白"
+ * @param input.name   人名，如 "小芸"/"王总"
+ * @param input.label  外观描述（始终有，命名失败时兜底用）
+ * @param input.counters 分性别独立计数器（按引用修改）
+ *
+ * 实现要点：
+ *   - 触发条件刻意要求 `gender && role` 同时存在：只有 name 没 role 时容易把
+ *     "被提及的别人"误标成说话人（"我妹妹来了" → name=小芸，但说话人是哥哥）
+ *   - role 是语义骨架；name 是可选锦上添花
+ *   - counters 是引用 mutable，++ 自增并使用
+ */
+const composeCharacterName = (input: {
+  gender: '男' | '女' | null
+  role: string | null
+  name: string | null
+  label: string | null
+  counters: { 男: number; 女: number; 未知: number }
+}): string => {
+  const { gender, role, name, label, counters } = input
+  // 命名风格触发条件：性别已知，且至少有 role（称谓是命名的语义骨架，无 role 时
+  // 仅靠 name 容易把"被提及的人"错认成"说话人"——M3 常见误判，宁可走 fallback）
+  if (gender && role) {
+    const idx = ++counters[gender]
+    const tail = name ? `-${role}-${name}` : `-${role}`
+    return `${gender}${idx}${tail}`
+  }
+  // Fallback：M3 没挖出来命名信息，回退旧逻辑 "角色 N (外观描述)"
+  const idx = ++counters.未知
+  return label ? `角色 ${idx} (${label})` : `角色 ${idx}`
+}
 
 /** ASR 后句段细分的阈值（v0.4.5 回到合理默认）
  *

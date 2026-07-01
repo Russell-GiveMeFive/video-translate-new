@@ -21,7 +21,8 @@ const DEFAULT_CONFIG: ProjectConfig = {
   llm: { model: 'MiniMax-M3' },
   subtitle: { burnIn: true, bilingual: true },
   // v0.4.9 默认 true：短剧绝大多数有烧录中文字幕。
-  // 用户创建项目向导里可改为 false 跳过 VLM OCR，省 ~$1/单片成本。
+  // v0.5 OCR 全局禁用：M3 VLM OCR 实测把画面里的招牌/手机屏/品牌 logo 也识别成字幕，
+  // 决定全 ASR。hasBurnedInSubtitles 保留为视频属性元信息但不再驱动行为。
   ocr: { hasBurnedInSubtitles: true },
 }
 
