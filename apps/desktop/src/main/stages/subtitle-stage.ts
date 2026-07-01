@@ -28,9 +28,26 @@ export const subtitleBurnStage: Stage = {
   async run(ctx: StageRunContext): Promise<StageResult> {
     const t0 = Date.now()
     const project = ProjectRepo.get(ctx.projectId as any)
-    const segs = SegmentRepo.list(ctx.projectId as any).filter(
+    const allSegs = SegmentRepo.list(ctx.projectId as any).filter(
       (s) => (s.tgtTextEdited ?? s.tgtText)?.trim(),
     )
+
+    // v0.5 保留原音范围内跳过整句字幕 —— 判定策略与 mix-render 保持一致（中心点）
+    const ranges = project.config.originalAudioRanges ?? []
+    const isInRange = (s: (typeof allSegs)[number]): boolean => {
+      if (ranges.length === 0) return false
+      const centerMs = (s.startMs + s.endMs) / 2
+      return ranges.some((r) => centerMs >= r.startMs && centerMs < r.endMs)
+    }
+    const skippedByRange = allSegs.filter(isInRange).length
+    const segs = allSegs.filter((s) => !isInRange(s))
+    if (skippedByRange > 0) {
+      ctx.logger.info('originalAudioRanges 内的字幕已跳过', {
+        skipped: skippedByRange,
+        remain: segs.length,
+      })
+    }
+
     if (segs.length === 0) {
       return { kind: 'skipped', reason: '没有可用译文，跳过字幕生成' }
     }

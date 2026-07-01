@@ -738,7 +738,7 @@ const speakerGenderHint = new Map<string, Map<string, 'male' | 'female' | null>>
  * （上一次跑 speaker 0 是 female，这次重跑变 male）。多句加权投票能压低这种噪声。
  */
 const summarizeGenderBySpeaker = (
-  utterances: AsrUtterance[],
+  utterances: AsrUtterance[], // 语音段
 ): Map<string, 'male' | 'female' | null> => {
   const MIN_UTTER_MS = 1_500
   const SIGNIFICANCE = 0.65

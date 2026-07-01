@@ -1,7 +1,12 @@
 import { mkdir, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
-import type { Stage, StageRunContext, StageResult } from '@dramaprime/core-types'
+import type {
+  OriginalAudioRange,
+  Stage,
+  StageRunContext,
+  StageResult,
+} from '@dramaprime/core-types'
 import { ProjectRepo } from '../storage/project-repo.js'
 import { SegmentRepo, CharacterRepo } from '../storage/index.js'
 import {
@@ -10,6 +15,37 @@ import {
   requireFfprobe,
   runCmd,
 } from '../ffmpeg/index.js'
+
+/**
+ * v0.5 判定一个 ASR segment 是否被 "originalAudioRanges" 覆盖 → 用源音替 TTS。
+ *
+ * ⚠️ 关键决策：range 边界可能不落在 segment 边界上，判定策略影响用户体验：
+ *
+ *   策略 A（严格）：segment 必须"完全落在"某个 range 内才算覆盖
+ *                  优点：TTS 不会被误替换；缺点：range 稍微画短一点这句就漏
+ *
+ *   策略 B（中心点，推荐）：segment 中心时间落在某个 range 内即覆盖
+ *                  优点：容忍 range 边界与 ASR 切句边界的偏差；缺点：极端情况可能误伤
+ *
+ *   策略 C（重叠比例）：segment 与 range 重叠超过 X% 即覆盖
+ *                  优点：最灵活；缺点：X% 阈值不好选
+ *
+ * 我们选 B —— ASR 切句通常贴着说话人换气，range 通常按语义/场景画，
+ * 中心点策略在实践中最不易出错。
+ *
+ * 参数：
+ *   - segStartMs / segEndMs：segment 的起止毫秒
+ *   - ranges：项目 originalAudioRanges（已经过 normalizeRanges 排序合并）
+ */
+const segmentInOriginalRanges = (
+  segStartMs: number,
+  segEndMs: number,
+  ranges: OriginalAudioRange[],
+): boolean => {
+  if (ranges.length === 0) return false
+  const centerMs = (segStartMs + segEndMs) / 2
+  return ranges.some((r) => centerMs >= r.startMs && centerMs < r.endMs)
+}
 
 /**
  * 真实 preprocess stage：
@@ -203,20 +239,34 @@ export const realMixRenderStage: Stage = {
     await mkdir(outDir, { recursive: true })
     const outPath = join(outDir, 'out.mp4')
 
-    // v0.4.16 P1 → v0.4.22 优先级：
-    //   1. segment.useOriginalAudio（per-segment 用户精确控制）
-    //   2. character.useOriginalAudio（per-character 兜底，目前 UI 已下线但 DB 字段保留）
-    // 用 src_audio_path 替 TTS
+    // v0.4.16 P1 → v0.4.22 → v0.5 优先级（任一为 true 即用源音）：
+    //   1. segment.useOriginalAudio（per-segment 用户在"工作台"精确控制）→ 用 srcAudioPath (vocals-only)
+    //   2. 项目 originalAudioRanges 覆盖到该 segment（"预处理"tab 用户手画的时间段）
+    //      → segment 从 mix 里剔除，改由 filter graph 用源视频**完整音轨**在 range 时间段回填
+    //        (含 BGM/音效/人声，不是只有人声)
+    //   3. character.useOriginalAudio（per-character 兜底，目前 UI 已下线但 DB 字段保留）
     const allSegs = SegmentRepo.list(ctx.projectId as any)
     const characters = CharacterRepo.list(ctx.projectId as any)
     const useOrigMap = new Map(characters.map((c) => [c.id, c.useOriginalAudio]))
+    const ranges = project.config.originalAudioRanges ?? []
+    if (ranges.length > 0) {
+      ctx.logger.info('originalAudioRanges 生效（用源视频完整音轨覆盖）', {
+        count: ranges.length,
+        totalMs: ranges.reduce((s, r) => s + (r.endMs - r.startMs), 0),
+      })
+    }
+    // 关键：range 命中的 segment **不入 mix** —— 由 filter graph 直接从 [0:a] 抽这段回填
+    const isCoveredByRange = (s: (typeof allSegs)[number]): boolean =>
+      segmentInOriginalRanges(s.startMs, s.endMs, ranges)
     const resolveUseOrig = (s: typeof allSegs[number]): boolean =>
       s.useOriginalAudio || (useOrigMap.get(s.characterId as any) ?? false)
-    const segs = allSegs.filter((s) => {
-      const useOrig = resolveUseOrig(s)
-      const audioPath = useOrig ? s.srcAudioPath : s.tgtAudioPath
-      return audioPath && existsSync(audioPath)
-    })
+    const segs = allSegs
+      .filter((s) => !isCoveredByRange(s)) // range 覆盖的整段剔除
+      .filter((s) => {
+        const useOrig = resolveUseOrig(s)
+        const audioPath = useOrig ? s.srcAudioPath : s.tgtAudioPath
+        return audioPath && existsSync(audioPath)
+      })
     const durMs = project.sourceDurMs ?? 0
 
     // 字幕烧入：subtitle-burn stage 产物是否存在？
@@ -272,6 +322,7 @@ export const realMixRenderStage: Stage = {
         durMs,
         burnSubs ? subsAssPath : null,
         hasAccompaniment,
+        ranges,
       )
       const scriptPath = join(outDir, 'filter.txt')
       await writeFile(scriptPath, filterScript, 'utf8')
@@ -388,6 +439,23 @@ export const realMixRenderStage: Stage = {
  *     [1:a]adelay=...[a0]; ...
  *     [bg][silence][a0][a1]...amix=...[outa]
  */
+/**
+ * 构造 ffmpeg filter_complex 脚本。
+ *
+ * v0.5 新增 originalAudioRanges 覆盖：
+ *   - range 内：完全用**源视频 [0:a] 完整音轨**（含 BGM/音效/人声，用户手画的这段"原汁原味"）
+ *   - range 外：走原有 TTS + 伴奏 混音逻辑
+ *
+ * 实现原理（gate + refill）：
+ *   1. 走原有逻辑构造 mix_pre（伴奏/兜底 + TTS 各段 + 静音基线）
+ *   2. mix_pre 用 volume 的 enable 表达式在所有 range 时间段静音 → mix_gated
+ *   3. [0:a] 用 asplit 复制 N 份，每份 atrim 抽出一个 range 时间段、adelay 到原时间点
+ *   4. mix_gated + 所有 orig_seg_* amix 相加 → outa
+ *
+ * enable 表达式：`between(t,S1,E1)+between(t,S2,E2)+...`
+ *   volume=... 时 enable=true 用第一个参数，enable=false 用第二个
+ *   ffmpeg 的 volume 支持 enable 语法，这里用它做"时间窗内静音"
+ */
 const buildAudioVideoFilterGraph = (
   segs: Array<{ tgtAudioPath: string | null; startMs: number }>,
   totalDurMs: number,
@@ -395,29 +463,43 @@ const buildAudioVideoFilterGraph = (
   subtitlesPath: string | null,
   /** demix 伴奏轨是否可用 */
   hasAccompaniment: boolean,
+  /** 保留原音时间段（用源视频完整音轨覆盖） */
+  ranges: OriginalAudioRange[],
 ): string => {
   const parts: string[] = []
   const labels: string[] = []
   const wholeDurMs = Math.round(totalDurMs)
+  const hasRanges = ranges.length > 0
 
-  // 背景音
+  // ── [0:a] 复用：原音轨要在多处用到 ────────────────────
+  //   - 无伴奏兜底 bg（如果没 demix 产物）
+  //   - 每个 range 抽片段
+  // 用 asplit 复制成 N 份，避免"filter 图中 pad 被使用多次"错误
+  const origConsumers: string[] = [] // 记录每个 [0:a] 复制份的 label
+  const needOrigForBg = !hasAccompaniment
+  const rangeCount = hasRanges ? ranges.length : 0
+  const splitCount = (needOrigForBg ? 1 : 0) + rangeCount
+  if (splitCount > 1) {
+    const splits = Array.from({ length: splitCount }, (_, i) => `[src${i}]`).join('')
+    parts.push(`[0:a]asplit=${splitCount}${splits}`)
+    for (let i = 0; i < splitCount; i++) origConsumers.push(`[src${i}]`)
+  } else if (splitCount === 1) {
+    // 只用一次，直接引用 [0:a]（无需 asplit 开销）
+    origConsumers.push(`[0:a]`)
+  }
+  let origIdx = 0
+  const takeOrig = (): string => origConsumers[origIdx++]!
+
+  // ── 背景音（TTS 层里的 bg） ────────────────────
   if (hasAccompaniment) {
-    // demix 伴奏轨 = 大部分 BGM/音效，但 demucs 仍会残留少量人声（尤其情绪激烈段）
-    // 这里加一个轻度滤波链进一步压制残留：
-    //   - highpass=60 → 切掉低频 hum/低频残留人声
-    //   - lowpass=8000 → 切掉高频齿音（人声特征频段）
-    //   - acompressor → 动态压缩，把还冒头的残留人声拉平
-    //   - volume=0.7 → 适当降一点让译制 TTS 突出
     parts.push(
       `[1:a]highpass=f=60,lowpass=f=8000,acompressor=threshold=-20dB:ratio=4:attack=20:release=200,volume=0.7[bg]`,
     )
   } else {
-    // 兜底：原音轨压低 -15dB（原中文人声会残留）
-    parts.push(`[0:a]volume=0.18[bg]`)
+    parts.push(`${takeOrig()}volume=0.18[bg]`)
   }
 
-  // TTS 音轨索引：有伴奏时从 2 开始（0=视频, 1=伴奏, 2..N+1=TTS）；
-  //                没伴奏时从 1 开始（0=视频, 1..N=TTS）
+  // ── TTS 段延迟 ────────────────────
   const ttsStartIdx = hasAccompaniment ? 2 : 1
   for (let i = 0; i < segs.length; i++) {
     const s = segs[i]!
@@ -428,15 +510,50 @@ const buildAudioVideoFilterGraph = (
     labels.push(`[a${i}]`)
   }
 
-  // 静音基线
+  // ── 静音基线（保证时长） ────────────────────
   const silenceDurSec = (totalDurMs / 1000).toFixed(3)
   parts.push(`anullsrc=channel_layout=mono:sample_rate=32000:d=${silenceDurSec}[silence]`)
 
-  const inputs = ['[bg]', '[silence]', ...labels].join('')
-  const inputCount = labels.length + 2
+  // ── mix_pre = bg + silence + TTS 各段 ────────────────────
+  const mixInputs = ['[bg]', '[silence]', ...labels].join('')
+  const mixInputCount = labels.length + 2
+  const mixOutLabel = hasRanges ? '[mix_pre]' : '[outa]'
   parts.push(
-    `${inputs}amix=inputs=${inputCount}:duration=longest:dropout_transition=0:normalize=0[outa]`,
+    `${mixInputs}amix=inputs=${mixInputCount}:duration=longest:dropout_transition=0:normalize=0${mixOutLabel}`,
   )
+
+  // ── range 覆盖 —— gate + refill ────────────────────
+  if (hasRanges) {
+    // 1. gate：mix_pre 在所有 range 时间段静音
+    //    enable 表达式用秒（ffmpeg 的 t 是秒），between(t, S_sec, E_sec)
+    //    多个 range → +（或表达式）
+    const enableExpr = ranges
+      .map((r) => `between(t\\,${msToSec(r.startMs)}\\,${msToSec(r.endMs)})`)
+      .join('+')
+    parts.push(`[mix_pre]volume=enable='${enableExpr}':volume=0[mix_gated]`)
+
+    // 2. refill：每个 range 从 [0:a] 抽对应时间段 → adelay 回原位置
+    const refillLabels: string[] = []
+    for (let i = 0; i < ranges.length; i++) {
+      const r = ranges[i]!
+      const startSec = msToSec(r.startMs)
+      const endSec = msToSec(r.endMs)
+      const delayMs = Math.max(0, Math.round(r.startMs))
+      // atrim 抽片段 → asetpts 复位时间戳 → adelay 回原位置 → apad 补齐总时长
+      // asetpts=PTS-STARTPTS 关键：不复位的话 adelay 计算基准是原时间戳，位置会翻倍
+      parts.push(
+        `${takeOrig()}atrim=start=${startSec}:end=${endSec},asetpts=PTS-STARTPTS,` +
+          `adelay=${delayMs}|${delayMs},apad=whole_dur=${wholeDurMs}ms[orig${i}]`,
+      )
+      refillLabels.push(`[orig${i}]`)
+    }
+
+    // 3. mix_gated + 所有 refill amix 相加
+    const finalInputs = ['[mix_gated]', ...refillLabels].join('')
+    parts.push(
+      `${finalInputs}amix=inputs=${refillLabels.length + 1}:duration=longest:dropout_transition=0:normalize=0[outa]`,
+    )
+  }
 
   if (subtitlesPath) {
     parts.push(`[0:v]subtitles=${escapeFfmpegPath(subtitlesPath)}[outv]`)
@@ -444,6 +561,8 @@ const buildAudioVideoFilterGraph = (
 
   return parts.join(';\n')
 }
+
+const msToSec = (ms: number): string => (ms / 1000).toFixed(3)
 
 /**
  * ffmpeg filter 参数里路径转义：

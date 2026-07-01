@@ -127,6 +127,23 @@ export class ProjectRepo {
       .prepare(`UPDATE projects SET ${fields.join(', ')}, updated_at = ? WHERE id = ?`)
       .run(...params)
   }
+
+  /**
+   * v0.5 更新"保留原音"时间范围列表——read-modify-write 整个 config JSON。
+   * 调用方负责失效相关 stage（见 project.ts handler）。
+   */
+  static setOriginalAudioRanges(
+    id: ProjectId,
+    ranges: import('@dramaprime/core-types').OriginalAudioRange[],
+  ): void {
+    const row = db().prepare('SELECT config_json FROM projects WHERE id = ?').get(id) as any
+    if (!row) throw new Error('project not found: ' + id)
+    const config = JSON.parse(row.config_json)
+    config.originalAudioRanges = ranges
+    db()
+      .prepare(`UPDATE projects SET config_json = ?, updated_at = ? WHERE id = ?`)
+      .run(JSON.stringify(config), Date.now(), id)
+  }
 }
 
 const rowToStageRecord = (r: any): StageRecord => ({
