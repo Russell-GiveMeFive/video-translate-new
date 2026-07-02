@@ -470,12 +470,16 @@ const buildAudioVideoFilterGraph = (
   const labels: string[] = []
   const wholeDurMs = Math.round(totalDurMs)
   const hasRanges = ranges.length > 0
+  // FIX P3 (v0.5.1) range 边界淡入淡出时长（ms）；range 太短（< 2×FADE_MS）时跳过避免重叠
+  const FADE_MS = 80
 
   // ── [0:a] 复用：原音轨要在多处用到 ────────────────────
-  //   - 无伴奏兜底 bg（如果没 demix 产物）
+  //   - 无伴奏时作 bg 兜底源（[0:a]volume=0.18）
   //   - 每个 range 抽片段
   // 用 asplit 复制成 N 份，避免"filter 图中 pad 被使用多次"错误
   const origConsumers: string[] = [] // 记录每个 [0:a] 复制份的 label
+  // FIX Q1 (v0.5.1) 撤回 P2 染色改动：源音 [0:a] 含 100% 强度中文人声，
+  //   即便压低到 -25dB 也能听清；改为 TTS 段单独 EQ 补偿解决"闷"问题。
   const needOrigForBg = !hasAccompaniment
   const rangeCount = hasRanges ? ranges.length : 0
   const splitCount = (needOrigForBg ? 1 : 0) + rangeCount
@@ -491,21 +495,32 @@ const buildAudioVideoFilterGraph = (
   const takeOrig = (): string => origConsumers[origIdx++]!
 
   // ── 背景音（TTS 层里的 bg） ────────────────────
+  // FIX P1 (v0.5.1) 解决"TTS 段比原音段沉闷"：
+  //   demucs 后处理保守放宽：lowpass 8k→12k（保留齿音/空间感，但不过分放大残留人声）
+  //   ⚠️ 曾尝试 [0:a]×0.06 染色注入"空气感"（FIX P2），但用户反馈能听到原语言人声残留——
+  //     原因是源音未经过神经网络分离，含 100% 强度中文人声；改用 TTS 段单独 EQ 补偿。
   if (hasAccompaniment) {
     parts.push(
-      `[1:a]highpass=f=60,lowpass=f=8000,acompressor=threshold=-20dB:ratio=4:attack=20:release=200,volume=0.7[bg]`,
+      `[1:a]highpass=f=60,lowpass=f=12000,acompressor=threshold=-20dB:ratio=4:attack=20:release=200,volume=0.7[bg]`,
     )
   } else {
     parts.push(`${takeOrig()}volume=0.18[bg]`)
   }
 
-  // ── TTS 段延迟 ────────────────────
+  // ── TTS 段延迟 + EQ 补偿 ────────────────────
+  // FIX Q3 (v0.5.1) TTS 段单独 EQ 补偿，解决"闷"而不引入新人声源：
+  //   - 3kHz 提 2dB：增强语音清晰度（人耳对 2-4kHz 敏感）
+  //   - 10kHz 提 1.5dB：补齿音/空气感（TTS 普遍高频延展不足）
+  //   EQ 只对已有信号做频响调整，不会产生新信号 → 不会带人声残留
   const ttsStartIdx = hasAccompaniment ? 2 : 1
   for (let i = 0; i < segs.length; i++) {
     const s = segs[i]!
     const delay = Math.max(0, Math.round(s.startMs))
     parts.push(
-      `[${ttsStartIdx + i}:a]adelay=${delay}|${delay},apad=whole_dur=${wholeDurMs}ms[a${i}]`,
+      `[${ttsStartIdx + i}:a]adelay=${delay}|${delay},apad=whole_dur=${wholeDurMs}ms,` +
+        `equalizer=f=3000:t=q:w=1.5:g=2,` +
+        `equalizer=f=10000:t=q:w=2:g=1.5` +
+        `[a${i}]`,
     )
     labels.push(`[a${i}]`)
   }
@@ -539,10 +554,19 @@ const buildAudioVideoFilterGraph = (
       const startSec = msToSec(r.startMs)
       const endSec = msToSec(r.endMs)
       const delayMs = Math.max(0, Math.round(r.startMs))
-      // atrim 抽片段 → asetpts 复位时间戳 → adelay 回原位置 → apad 补齐总时长
+      // FIX P3 (v0.5.1) range 边界加 80ms 淡入淡出，range 太短（< 160ms）跳过避免 fade 重叠
+      const rangeDurMs = r.endMs - r.startMs
+      const canFade = rangeDurMs > FADE_MS * 2
+      const fadeChain = canFade
+        ? `afade=t=in:st=0:d=${(FADE_MS / 1000).toFixed(3)},` +
+          `afade=t=out:st=${((rangeDurMs - FADE_MS) / 1000).toFixed(3)}:d=${(FADE_MS / 1000).toFixed(3)},`
+        : ''
+      // atrim 抽片段 → asetpts 复位时间戳 → [可选 afade] → adelay 回原位置 → apad 补齐总时长
       // asetpts=PTS-STARTPTS 关键：不复位的话 adelay 计算基准是原时间戳，位置会翻倍
+      // afade 基于 atrim 后的相对时间（st=0 是片段起点，st=dur-0.08 是末尾前 80ms）
       parts.push(
         `${takeOrig()}atrim=start=${startSec}:end=${endSec},asetpts=PTS-STARTPTS,` +
+          fadeChain +
           `adelay=${delayMs}|${delayMs},apad=whole_dur=${wholeDurMs}ms[orig${i}]`,
       )
       refillLabels.push(`[orig${i}]`)
