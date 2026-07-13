@@ -87,11 +87,11 @@ cd packaging\demucs
 
 `apps/desktop/src/main/ffmpeg/index.ts` 的 `resolveDemucs()` 按以下优先级查找：
 
-1. **打包内的 binary**：`binaries/demucs/<platform-arch>/demucs[.exe]`（最高优先级）
-2. 系统 PATH（用户自己 `pip install demucs`）
-3. macOS 常见位置（`~/Library/Python/3.x/bin/demucs`）
+1. `DRAMAPRIME_DEMUCS_PATH` 显式覆盖路径
+2. 系统 PATH / pip / conda / macOS 常见位置（直接 Python runtime 更稳定）
+3. **打包内的 binary**：`binaries/demucs/<platform-arch>/demucs[.exe]` 兜底
 
-electron-builder 的 `asarUnpack` 配置确保 `binaries/demucs/` 整个目录在打包后仍可 spawn。
+设置 `DRAMAPRIME_DEMUCS_FORCE_BUNDLED=1` 可在排障时强制优先 bundled binary。electron-builder 通过 `extraResources` 把对应平台目录复制到安装包的 `resources/binaries/demucs/`，确保子进程可以直接 spawn。
 
 ## CI/CD
 

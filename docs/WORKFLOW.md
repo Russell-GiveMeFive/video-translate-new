@@ -1,7 +1,7 @@
 # DramaPrime · 端到端工作流
 
 > **版本**：v0.5（与代码同步）
-> **日期**：2026-07-01
+> **日期**：2026-07-13（按当前代码同步）
 > **目标读者**：新加入的工程师 / 产品 / 客户
 >
 > 这份文档讲清楚「一段中文短剧输入后，DramaPrime 在内部都做了什么」。
@@ -16,7 +16,8 @@
 输出:  1 段译制 mp4（任意目标语种、原音被替、可选烧录新字幕）
 
 技术:  14 阶段串行 pipeline，
-       涉及 4 个外部 AI 服务（MiniMax M3 + MiniMax Speech-2.8 + 火山豆包 Seed-ASR + PyInstaller-demucs），
+       涉及 3 类外部 AI 能力（MiniMax M3 + MiniMax Speech-2.8/Voice Clone + 火山豆包 Seed-ASR），
+       以及本地 system/bundled Demucs，
        本地一个 Electron 桌面壳子 + SQLite + 文件系统。
 ```
 
@@ -40,11 +41,11 @@
 ┌──────────────────── 14 阶段 pipeline（自动串行）────────────────────┐
 │                                                                        │
 │  ① preprocess          抽 metadata + 5 张缩略图                          │
-│  ② import-precheck      硬字幕检测（v1.0 仅警告）                        │
+│  ② import-precheck      mock（硬字幕准入检查待实现）                     │
 │  ③ shot-detect          镜头切分（占位）                                  │
 │  ④ demix                PyInstaller-demucs / system demucs                │
 │  ⑤ asr-diarize          火山豆包 Seed-ASR（流式 + 说话人）              │
-│  ⑥ ocr-assist           [可选] MiniMax M3 Vision 读原片烧录中文时间轴      │
+│  ⑥ ocr-assist           disabled：保留 VLM 实现，当前直接 skipped 走 ASR  │
 │  ⑦ cluster             ASR utterances 按 speaker 聚类 → characters      │
 │  ⑧ voice-clone          MiniMax voice_clone：每个角色选样 → 上传 → 复刻  │
 │  ⑨ translate            MiniMax M3 batch 翻译（12 句/批）                │
@@ -53,12 +54,12 @@
 │  ⑫ subtitle-burn       生成 ASS / SRT，range 内跳过整句字幕（v0.5）      │
 │  ⑬ mix-render           ffmpeg filter_complex 混音 + 烧字幕 + 输出 mp4  │
 │                         range 内 gate + refill 用源音替换 TTS（v0.5）    │
-│  ⑭ finalize            写 manifest.json（产物清单 + 成本 + 时长）        │
+│  ⑭ finalize            mock（manifest / 工程包导出待实现）               │
 │                                                                        │
 └────────────────────────────────────────────────────────────────────────┘
                   ↓
 ┌──────────────────── 产物 ────────────────────────────────────────────┐
-│  apps/desktop/release/<projectId>/render/out.mp4       译制视频       │
+│  <userData>/projects/<projectId>/render/out.mp4         译制视频       │
 │                                       /subs/out.ass    字幕文件        │
 │                                       /tts/*.mp3       各句 TTS 音频    │
 │                                       /stems/          人声/伴奏分离     │
@@ -75,16 +76,16 @@
 
 > 详细实现见代码 + TDD.md；这里只讲**这个 stage 用什么模型、什么参数、什么时候会失败**。
 
-### ② preprocess / ③ shot-detect
+### ① preprocess / ② import-precheck / ③ shot-detect
 
-纯本地 ffmpeg 推理。`ffmpeg-installer` 包提供二进制，**不调任何 AI**。ffmpeg 抽 1 帧 + ffprobe 读时长 / 宽高 / fps，写 `preprocess/metadata.json`。
+`preprocess` 是真实实现：`ffmpeg-installer` 提供二进制，等间距抽 5 帧；ffprobe 读时长 / 宽高 / fps，写 `preprocess/metadata.json`。`import-precheck` 与 `shot-detect` 当前仍为 mock，不会真的做硬字幕检测或镜头切分。
 
 ### ④ demix（人声分离）
 
 | 选项 | 命令 | 模型 | 输出 |
 |:--|:--|:--|:--|
 | **优先** | `system demucs` (pip) | Facebook Demucs `htdemucs_ft` | 2 wav：vocals.wav / accompaniment.wav |
-| **fallback** | `binaries/demucs/darwin-arm64/demucs` | 同上（PyInstaller 打包） | 同上 |
+| **fallback** | `binaries/demucs/<platform-arch>/demucs[.exe]` | 同上（PyInstaller standalone） | 同上 |
 
 **耗时**：~30s/分钟视频。**失败** = `kind: 'skipped'`，下游用源音轨兜底（音量压低 15dB）。
 
@@ -102,21 +103,11 @@
 - 火山对**穿插英文歌词**返回 `startMs: -1`（卡拉 OK 词级时间戳）—— ASR 阶段已加脏数据过滤（`startMs < 0` 丢弃）
 - 中长句（4 秒以上）会被 `splitByWords` 拆成多个 segment
 
-### ⑥ ocr-assist（**可选**，用户创建项目时勾选）
+### ⑥ ocr-assist（当前全局禁用）
 
-| 项 | 值 |
-|:--|:--|
-| 何时跑 | `config.ocr.hasBurnedInSubtitles === true` |
-| Provider | MiniMax M3 **Vision**（走 Anthropic 兼容 `/v1/messages`，传 image content block）|
-| 抽帧 | 1.5 fps + 480px 宽（节省 token） |
-| 全局超时 | 60s（防 VLM 卡住）|
-| 并发 | 4 路 |
-| 输出 | 把"中文出现/消失"时间区间重写 SQLite segments 表（**替换** ASR 切句）|
-| 用户填 | MiniMax.api_key（复用 M3 key） |
+`vlm-ocr-stage.ts` 仍保留完整的抽帧、M3 Vision、并发、超时和 segments 重写实现，但 `run()` 开头无条件返回 `kind: 'skipped'`。原因是 M3 容易把招牌、手机屏和 logo 当成字幕，且短剧画面较容易命中内容审核；当前统一沿用 ASR 切句。
 
-**为什么需要**：ASR 切句节奏 ≠ 原片烧录字幕节奏，导致"1 段中文配 N 段译文"。OCR 用原片字幕时间轴强制对齐。
-
-**v0.4.12 失败容错**：单帧 API error → 跳过整帧；前 10 帧全空 → 早退（视频无字幕）；60s 超时 → 走 ASR 兜底。
+新建项目里的“是否有烧录字幕”暂时只作为兼容元信息保存，不会触发 OCR 或增加调用成本。未来重新启用时，应先删除入口的 disabled return，并重新验证 UI 文案、成本和覆盖策略。
 
 ### ⑦ cluster（按说话人聚类 → 角色）
 
@@ -128,7 +119,7 @@
 
 | 项 | 值 |
 |:--|:--|
-| Provider | MiniMax `/v1/voice_clone`（PyInstaller 包装的 binary 或系统 demucs 同理，这里是 system `clone` SDK）|
+| Provider | MiniMax `/v1/files/upload` + `/v1/voice_clone` 三步流程 |
 | 模型 | MiniMax 临时复刻音色（**7 天有效期**）|
 | 样本 | 10-30s 干净人声，score = SNR×0.4 + 时长×0.3 + 背景音反向×0.3 |
 | 不足 10s | 循环复制填充到 10.5s（v0.4.12 加的） |
@@ -232,9 +223,9 @@ ffmpeg filter_complex 一次性合成：
 | `speed` 短句嘶吼 | tts-stage.ts | 0.6 | 拖长爆发感（0.5-2.0 范围下限附近）|
 | `intensity` 短句嘶吼 | voice_modify | -40 | 声纹"刚劲"参数（负值更沉）|
 | `timbre` 短句嘶吼 | voice_modify | -20 | 声纹"浑厚"参数（负值更厚）|
-| VLM 抽帧 fps | vlm-ocr-stage.ts | 1.5 | 抽帧密度（1.5 fps 足够 0.5s 字幕） |
-| VLM 全局超时 | vlm-ocr-stage.ts | 60000ms | 60s 超时走 ASR 兜底 |
-| VLM 并发 | vlm-ocr-stage.ts | 4 | M3 VLM 并发请求数 |
+| VLM 抽帧 fps | vlm-ocr-stage.ts | 1.5 | dormant 配置；OCR 重启时使用 |
+| VLM 全局超时 | vlm-ocr-stage.ts | 60000ms | dormant 配置；OCR 重启时使用 |
+| VLM 并发 | vlm-ocr-stage.ts | 4 | dormant 配置；OCR 重启时使用 |
 | TTS 段间 throttle | tts-stage.ts | 200ms | 5 RPS（防 MiniMax RPM 限流） |
 
 ---
@@ -253,9 +244,7 @@ PCM 16k mono
 utterances[{ startMs, endMs, text, speakerId, words[] }]
   ↓ splitByWords (asr-cluster-stages)
 cleaned segments
-  ↓ [可选] M3 Vision 识别原片中文字幕时间轴
-  ↓    ocr-assist
-VLM 重写 segments 时间轴
+  ↓ ocr-assist 当前 skipped（历史 VLM OCR 实现保留）
   ↓ M3 LLM batch translate (translate-stage)
 segments with tgt_text
   ↓ MiniMax Speech-2.8 逐句合成 (tts-stage)
@@ -274,7 +263,7 @@ out.mp4
 |:--|:--|:--|
 | demix | demucs 没装 / 崩溃 | kind='skipped'，用源音轨 -15dB 兜底 |
 | asr-diarize | 网络超时 | 整 batch 重试 1 次（retries=1）|
-| ocr-assist | API 1006 限流 / 1026 内容敏感 | 单帧跳过 + 60s 全局超时 → ASR 兜底 |
+| ocr-assist | 当前全局 disabled | 直接 `kind='skipped'`，沿用 ASR segments |
 | voice-clone | 样本 < 2.5s | kind='skipped'，走系统音色 |
 | voice-clone | 样本 2.5-10s | 循环复制到 10.5s 再上传 |
 | translate | M3 合并多句 | 1:1 prompt + 后处理去重校验 + 单句重译 |
@@ -291,7 +280,7 @@ out.mp4
 
 | 文件 | 说明 |
 |:--|:--|
-| `apps/desktop/src/main/stages/<stage>.ts` | 14 阶段真实实现 |
+| `apps/desktop/src/main/stages/<stage>.ts` | 功能 stage 实现；另有 disabled / mock stage 由 orchestrator 装配 |
 | `apps/desktop/src/main/providers/index.ts` | 4 个外部 Provider 注册（MiniMax LLM/TTS/Clone、volcengine ASR）|
 | `apps/desktop/src/main/orchestrator/index.ts` | 14 阶段 stage 注册 + 持久化数据库 |
 | `apps/desktop/src/main/index.ts` | app:// 协议 + Range Request + 白名单（v0.5）|
@@ -320,7 +309,7 @@ out.mp4
 | preprocess | 5s | 0 |
 | demix | 30-90s | 0（本地） |
 | asr-diarize | 20-30s | ¥0.5-1 |
-| ocr-assist | 30-60s | ¥0.5-1.5（如果启用）|
+| ocr-assist | ~0s | ¥0（当前 disabled；重启 VLM 后才产生耗时与费用）|
 | cluster | 5-15s | 0 |
 | voice-clone | 30-60s/角色 | ¥0.5-2/角色 |
 | translate | 10-20s | ¥0.5-1.5 |

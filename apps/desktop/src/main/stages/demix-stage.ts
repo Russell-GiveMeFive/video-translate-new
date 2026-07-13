@@ -40,18 +40,16 @@ export const realDemixStage: Stage = {
     const demucs = resolveDemucs()
     if (!demucs) {
       ctx.logger.warn(
-        '⚠️ demucs 未找到，跳过人声分离。下游将使用源音轨（**原人声 + TTS 重合**，听感差）。',
+        '⚠️ demucs 未找到：当前安装/开发目录缺少对应平台 bundled binary，系统 PATH 也没有 demucs。跳过人声分离后，下游将使用源音轨（原人声 + TTS 重合，听感差）。',
       )
       ctx.logger.warn(
-        '安装方法：pip install demucs（首次会下载 ~3GB 模型 + 依赖）；或 brew install demucs（macOS）。',
+        '开发环境可 `pip install demucs`；发行包应通过 packaging/demucs 构建或 CI artifact 准备 bundled binary。',
       )
-      ctx.logger.warn(
-        '装完后重跑此 project 即可（resolveDemucs 缓存会在下次启动失效）。',
-      )
+      ctx.logger.warn('装完后重跑此 project 即可（resolveDemucs 缓存会在下次启动失效）。')
       return {
         kind: 'skipped',
         reason:
-          '⚠️ demucs 未安装，输出视频会出现"原语种与译制语种重合"。请 `pip install demucs` 后重跑。',
+          '⚠️ demucs 不可用，输出视频会出现“原语种与译制语种重合”。开发环境请安装 system demucs；发行包请补齐对应平台 bundled binary 后重跑。',
       }
     }
     ctx.logger.info('demucs 解析成功', { path: demucs })

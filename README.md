@@ -4,9 +4,9 @@
 >
 > 输入：中文 AI 短剧成片  →  输出：任意目标语种译制版（语音 + 字幕）
 
-- **版本**：v0.5（`package.json` = 0.5.0，2026-07-01）
-- **状态**：14-stage 流水线全链路真跑；demucs 人声分离 / LLM 视觉辅助分轨 / 保留原音预处理 / 导演工作台均已落地
-- **平台**：Windows 10+ / macOS 12+，桌面端
+- **版本**：v0.5（`package.json` = 0.5.0，文档同步于 2026-07-13）
+- **状态**：单集核心译制链路可真实运行；14 个 stage 中 `import-precheck` / `shot-detect` / `finalize` 仍为 mock，`ocr-assist` 当前全局禁用并回退 ASR
+- **平台**：当前发行目标为 Windows 10+ x64 / macOS 12+ arm64；Intel Mac 等目标仍需补齐对应 binary 与打包验证
 - **文档速览**：[产品定义 PRD](./docs/PRD.md) · [技术设计 TDD](./docs/TDD.md) · [v0.5 工程总结](./docs/TECH-OVERVIEW-v0.5.md) · [端到端 Workflow](./docs/WORKFLOW.md)
 
 ---
@@ -19,8 +19,8 @@
 | :-- | :-- | :-- |
 | Node | ≥ 20（已用 22 验证） | electron-vite + better-sqlite3 |
 | pnpm | ≥ 9 | `npm i -g pnpm` 安装 |
-| Python | 3.11 | demucs 依赖；v0.6 会打成 standalone binary 内嵌 |
-| demucs | `pip install demucs` | `htdemucs_ft` 模型首次运行会下载 |
+| Python | 3.9–3.11（可选） | 仅在本地重建 Demucs standalone 或使用 system demucs 时需要 |
+| demucs | bundled binary 或 `pip install demucs` | 发行包优先兼容 system demucs，并以 bundled binary 兜底；`binaries/` 不入 Git |
 
 ### 启动开发环境
 
@@ -51,19 +51,19 @@ pnpm build
 # 当前平台打包
 pnpm dist
 
-# 仅打 Mac（universal dmg）
+# 仅打 Mac（当前配置为 arm64 dmg）
 pnpm dist:mac
 
-# 仅打 Win（nsis + portable）
+# 仅打 Win（当前配置为 x64 NSIS Setup）
 pnpm dist:win
 ```
 
-打包前请准备好：
+正式打包前请准备好：
 
-1. macOS 签名证书（Apple Developer ID）+ 公证 App-specific password
+1. macOS 签名证书（如需对外分发）；当前 `electron-builder.yml` 的 notarize 仍关闭
 2. Windows EV Code Signing 证书
-3. `binaries/ffmpeg/<os-arch>/` 下放对应平台的 ffmpeg / ffprobe 静态二进制（参见 [RUNBOOK](./RUNBOOK.md)）
-4. demucs 目前仍需用户机器上 `pip install demucs`；v0.6 会用 PyInstaller 打进 `binaries/demucs/`
+3. 对应平台的 Demucs standalone 产物：运行 `packaging/demucs/build.sh` / `build.ps1`，或从 `Build Demucs Binary` workflow 下载后放入 `binaries/demucs/<platform-arch>/`
+4. ffmpeg / ffprobe 由 `@ffmpeg-installer` / `@ffprobe-installer` 随依赖提供，无需再手工复制到 `binaries/ffmpeg/`
 
 ---
 
@@ -75,7 +75,7 @@ pnpm dist:win
 │   └── desktop/                       # Electron 应用主体
 │       └── src/
 │           ├── main/                  # Node 主进程
-│           │   ├── stages/            # 14 个 pipeline stage 真实实现
+│           │   ├── stages/            # pipeline stage 实现（真实 / disabled / mock 混合）
 │           │   ├── ipc/               # IPC handler（project/segment/pipeline/system 等）
 │           │   ├── orchestrator/      # 流水线调度
 │           │   ├── storage/           # SQLite + better-sqlite3
@@ -91,7 +91,7 @@ pnpm dist:win
 │   ├── subtitle/                      # ASS V4+ / SRT 渲染器
 │   ├── provider-MiniMax/              # MiniMax M3 / Speech-2.8 / Voice Clone / Vision 客户端
 │   └── provider-volcengine/           # 火山豆包 ASR WebSocket 客户端
-├── sidecar/                           # Python 子进程占位（v0.6 打 demucs standalone 后使用）
+├── sidecar/                           # 通用 Python JSON-RPC sidecar 占位；Demucs 当前直接 spawn standalone CLI
 ├── binaries/                          # 随包二进制（ffmpeg / demucs / sidecar 产物）
 └── docs/                              # PRD / TDD / TECH-OVERVIEW-v0.5 / WORKFLOW / TECHNICAL-GUIDE
 ```
@@ -106,26 +106,27 @@ pnpm dist:win
 | :-- | :-: | :-- |
 | Electron 三层架构 | ✅ | Main / Preload / Renderer，sandbox 安全配置 |
 | IPC 类型契约 | ✅ | `ApiSurface` 强类型，含 v0.5 3 个 `project:*` 新通道 |
-| SQLite 持久化 | ✅ | migration 0001 初始 + 0002 加 TTS snapshot / user override / thumb |
-| Pipeline 14-stage 状态机 | ✅ | 全链路真跑；进度推送 / 断点续跑 / 依赖图调度 |
+| SQLite 持久化 | ✅ | migration 0001–0005：基础表、TTS snapshot、原音开关与 segment 音频路径 |
+| Pipeline 14-stage 状态机 | ⚠️ | 固定顺序调度；10 个功能 stage + 1 个 disabled stage + 3 个 mock stage |
 | 火山豆包 ASR | ✅ | WebSocket + speaker / gender / emotion / word-level 时间戳 |
 | ASR 句段细分 | ✅ | `refineUtterances` 按标点+长度切，防字幕"一大段挂屏" |
 | demucs 人声分离 | ✅ | `htdemucs_ft` 分离 vocals / accompaniment；accompaniment 二次降噪 |
 | LLM Vision 视觉辅助分轨 | ✅ | 兄弟脸辨识，MiniMax-M3 多模态 + 全 segment 送图 |
+| VLM OCR 字幕时间轴 | ⏸ | 实现代码保留，但因误识别与内容审核问题全局禁用；当前沿用 ASR 切句 |
 | MiniMax Voice Clone | ✅ | 三步走（upload → clone → voice_id）+ 短样本循环复制 |
 | MiniMax TTS + emotion | ✅ | 情绪映射（surprise→surprised 等）+ 2013 兜底 + 音学参数调优 |
 | LLM 翻译 + idx 严格映射 | ✅ | MiniMax-M3 批量翻译 + 重译压缩循环 |
 | 5 级时长对齐 | ✅ | fit / speed / SOLA / gap-borrow / video-slow / overflow |
 | ASS V4+ 双语字幕 + SRT | ✅ | `packages/subtitle` 独立包 |
 | ffmpeg 混音渲染 | ✅ | filter_complex + amix normalize=0 + 60s watchdog 防卡死 |
-| 保留原音预处理（v0.5） | ✅ | 时间轴刷子 + gate&refill filter graph + 只失效 2 stage |
+| 保留原音预处理（v0.5） | ✅ | 时间轴刷子 + gate&refill + range 边界 80ms fade + 只失效 2 stage |
 | Workstation 导演工作台 | ✅ | 角色 / segment / 详情三段式 + 单段重合成 |
 | 系统音色回退轮转 | ✅ | 男女各 6 个池子，按 character 序号 modulo |
-| demucs standalone 打包 | ⏳ | v0.6：PyInstaller 打 binary，去掉 `pip install` 依赖 |
-| 跨集音色资产库 | ⏳ | v0.6：同剧多集共享 voice_id，累积样本到 30s+ |
+| demucs standalone 打包 | ✅/⚠️ | PyInstaller 脚本、三平台 workflow 配置和打包接入点已完成；binary 是 Git 外部产物，发版前必须备齐并验证 |
+| 跨项目音色资产库 | ✅/⚠️ | `voice_assets` 列表、改名、移除已实现；跨集自动匹配与样本累积仍待做 |
 | 真 video-slow filter | ⏳ | v0.6：ffmpeg setpts 切片，让 align 的 video-slow 策略落地画面 |
 
-`✅` 已跑通 / `⏳` 待实现（详细路线见 TECH-OVERVIEW §5）
+`✅` 已跑通 / `⚠️` 部分完成或需发版准备 / `⏸` 当前禁用 / `⏳` 待实现（详细路线见 TECH-OVERVIEW §5）
 
 ---
 
@@ -166,7 +167,7 @@ pnpm dist:win
 - **better-sqlite3 / keytar 装不上** — 这两个是 native 模块，跨 Electron 版本需要 rebuild。`pnpm install` 后跑 `pnpm --filter @dramaprime/desktop exec electron-rebuild`。
 - **macOS 启动报 "App is damaged"** — 未签名 dev build 的预期表现。`xattr -cr <path-to-app>` 临时绕过。
 - **Renderer 看不到进度** — 检查 DevTools Console；常见原因是 `preload` 没正确 build → 重启 `pnpm dev`。
-- **demix stage 显示 skip** — 用户机器没装 demucs 或 `htdemucs_ft` 模型没下载完；下游会用源音轨兜底，但中文人声会有残留。装 `pip install demucs` 后重跑该 stage。
+- **demix stage 显示 skip** — 当前安装包或开发目录里没有对应平台 bundled binary，且系统也找不到 demucs。开发环境可 `pip install demucs`；发行包请先准备 `binaries/demucs/<platform-arch>/` 产物。下游虽会用源音轨兜底，但中文人声会残留。
 - **mix-render 卡住不出文件** — 60s watchdog 会自动 kill；若频繁触发，检查 filter graph 是否有 `apad` 缺 `whole_dur`（见 TECH-OVERVIEW §3.8）。
 - **预处理 tab 视频拖不动进度条** — `app://` protocol 的 Range Request 必须自己实现，若返回 200 而非 206 就会 `PIPELINE_ERROR_DECODE`。检查 `apps/desktop/src/main/index.ts` 的 handler。
 - **视觉拆分把两个人合成一组** — LLM Vision 判定倾向"同一人"避假阳性，若真的看错可以在 Workstation 手动调 character 归属；网络故障时会保持原分组不炸。

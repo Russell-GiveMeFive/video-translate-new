@@ -1,7 +1,7 @@
 # DramaPrime · 技术说明书
 
 > **版本**：v0.5（与代码同步）
-> **日期**：2026-07-01
+> **日期**：2026-07-13（按当前代码同步）
 > **目标读者**：新加入的开发者 / 二次开发
 >
 > 端到端工作流见 [`WORKFLOW.md`](./WORKFLOW.md)；产品需求见 [`PRD.md`](./PRD.md)；完整技术设计（含 IPC schema / SQLite DDL）见 [`TDD.md`](./TDD.md)。
@@ -40,7 +40,7 @@ video-translate-new/
 │   ├── electron.vite.config.ts     ← 编译配置
 │   ├── src/
 │   │   ├── main/                  ← Node 进程（IPC handler + pipeline + provider）
-│   │   │   ├── stages/            ← 14 stage 真实实现
+│   │   │   ├── stages/            ← stage 实现（真实 / disabled / mock 混合）
 │   │   │   ├── providers/         ← 4 个 provider 注册
 │   │   │   ├── orchestrator/      ← stage 注册 + 持久化
 │   │   │   ├── storage/           ← SQLite + 迁移
@@ -55,7 +55,7 @@ video-translate-new/
 │   │       └── stores/             ← 全局 zustand-like store
 │   └── release/                   ← 打包产物（gitignore）
 ├── packages/                       ← 纯逻辑包（无 Electron 依赖）
-│   ├── pipeline-core/             ← 14 stage mock 实现 + Orchestrator
+│   ├── pipeline-core/             ← Orchestrator + 14 stage mock 基线
 │   ├── align-engine/              ← 5 级级联策略
 │   ├── subtitle/                  ← ASS / SRT 生成
 │   ├── provider-MiniMax/         ← MiniMax M3 + Speech-2.8 + voice_clone
@@ -216,13 +216,14 @@ batches       ← 批量任务（v1.1 用）
 | keytar | 密钥 | 同上 |
 | @ffmpeg-installer/ffmpeg | 抽帧 / 转码 | 自动选平台 binary |
 | pino | 日志 | 多 stream 输出 |
-| zod | 运行时校验 | TDD §4 用 |
+| ws | 火山 ASR WebSocket | 真实 Provider 使用；当前 IPC 尚未接入 Zod 等 runtime schema 校验 |
 | @dramaprime/core-types | 共享类型 | pipeline-core / desktop 都引 |
 | @dramaprime/pipeline-core | 14 stage mock | 离线跑通 UI |
-| @dramaprime/align-engine | 5 级对齐策略 | 含测试 |
-| @dramaprime/subtitle | ASS / SRT | 含测试 |
+| @dramaprime/align-engine | 5 级对齐策略 | 纯逻辑包；自动化测试待补 |
+| @dramaprime/subtitle | ASS / SRT | 纯逻辑包；自动化测试待补 |
 | @dramaprime/provider-MiniMax | M3 + TTS + clone | 国内 MiniMax |
 | @dramaprime/provider-volcengine | 豆包 ASR | 国内火山引擎 |
+| electron-updater | 自动更新依赖 | 仅安装依赖，Main 尚未接入检查 / 下载 / 安装流程 |
 
 ---
 
@@ -357,6 +358,10 @@ Chromium 以后可以 seek。
 **加新资源类型时**：`mimeOf()` 是 MIME 映射白名单，加视频/音频/图片扩展名要在这里注册；不在里面的
 文件回 `application/octet-stream`，`<video>` 可能拒播。
 
+### 6.7 语种工程参数只维护一份
+
+`packages/core-types/src/languages.ts` 的 `LANGUAGES` / `LANG_MAP` 是 40 语种唯一主数据源。UI 下拉、翻译 prompt、align 压缩重译都直接读取其中的 `zhName`、`kFactor`、`regionNeutralRule`；不要在 stage 内再建 `K_TABLE` / `LANG_LABEL` / `REGION_NEUTRAL`。新增或校准语种时只改主表，并跑 `pnpm typecheck`。
+
 ---
 
 ## 7. 性能 / 容量
@@ -388,14 +393,18 @@ Chromium 以后可以 seek。
 
 ## 9. 发版 Checklist
 
-| 项 | 工具 |
+> 当前仓库只有 `typecheck` 是有效的自动化质量门禁：根 `lint` 命令找不到任何 workspace lint script，且尚无 `test` script。下面把未接入项明确标成待办，避免命令表造成“已覆盖”的误解。
+
+| 项 | 工具 / 状态 |
 |:--|:--|
 | 类型检查 | `pnpm typecheck` |
-| 单元测试 | `pnpm test` |
+| Lint | ⏳ 待接入 ESLint/Biome 与各 workspace `lint` script |
+| 单元 / 集成测试 | ⏳ 待接入 Vitest；当前没有 `pnpm test` |
 | 打包（mac + win） | `./build.sh` |
 | 产物路径 | `apps/desktop/release/DramaPrime-*.dmg` / `*.exe` |
 | 端到端冒烟 | 打开新建项目 → 选短片 → ▶ 开始 → 等 5 分钟 → 看 `out.mp4` |
 | 版本号 | 改 `package.json` 的 `version` + `apps/desktop/package.json` 同步 |
+| 自动更新 | ⏳ `electron-updater` 尚未接入 Main，当前通过重新下载安装包升级 |
 
 ---
 

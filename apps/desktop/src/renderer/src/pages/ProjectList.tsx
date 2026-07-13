@@ -301,10 +301,10 @@ function NewProjectDialog({
             <div className="mb-4" />
           )
         })()}
-        {/* v0.4.9 原片是否有烧录中文字幕（控制 VLM OCR 跑不跑） */}
+        {/* 原片字幕属性元信息；v0.5 VLM OCR 全局禁用，当前不会影响 pipeline 行为 */}
         <label className="mb-1 block text-xs text-zinc-400">
           原片是否有烧录中文字幕？
-          <span className="ml-2 text-zinc-600">· 有字幕开 OCR 让译文 1:1 对齐原片节奏</span>
+          <span className="ml-2 text-zinc-600">· 当前仅记录素材属性，OCR 暂未启用</span>
         </label>
         <div className="mb-6 flex gap-3">
           <label className="flex flex-1 cursor-pointer items-center gap-2 rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm hover:border-zinc-600">
@@ -314,8 +314,8 @@ function NewProjectDialog({
               checked={hasBurnedInSubtitles}
               onChange={() => setHasBurnedInSubtitles(true)}
             />
-            <span>有字幕（推荐）</span>
-            <span className="ml-auto text-[10px] text-zinc-500">~+1 分钟、~$0.5-1.5</span>
+            <span>有字幕</span>
+            <span className="ml-auto text-[10px] text-zinc-500">当前仍走 ASR 切句</span>
           </label>
           <label className="flex flex-1 cursor-pointer items-center gap-2 rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm hover:border-zinc-600">
             <input
@@ -325,7 +325,7 @@ function NewProjectDialog({
               onChange={() => setHasBurnedInSubtitles(false)}
             />
             <span>无字幕</span>
-            <span className="ml-auto text-[10px] text-zinc-500">省时省钱</span>
+            <span className="ml-auto text-[10px] text-zinc-500">当前仍走 ASR 切句</span>
           </label>
         </div>
         <div className="flex justify-end gap-2">

@@ -1,7 +1,7 @@
 # 短剧 AI 译制桌面客户端 TDD（技术方案文档）
 
-> **版本**：v0.1 + v0.4.13 状态补充
-> **日期**：2026-06-07（2026-06-15 补充）
+> **版本**：v0.1 + v0.4.13 状态补充 + 2026-07-13 实现边界说明
+> **日期**：2026-06-07（2026-07-13 最近核对）
 > **状态**：草稿；与 PRD v0.3（D1-D13 决议）对齐
 > **配套文档**：[PRD.md](./PRD.md) · [WORKFLOW.md](./WORKFLOW.md) · [TECHNICAL-GUIDE.md](./TECHNICAL-GUIDE.md)
 
@@ -25,6 +25,15 @@
 > - `segments` 表加 `thumb_path` 列（v0.4.11，关联到 thumb-extract stage）
 > - `voice_assets` 表早就 schema 里、v0.4.12 才实现 repo + IPC
 > - 详见 [WORKFLOW.md](./WORKFLOW.md) §6 关键文件路径
+
+> ## 2026-07-13 实现边界（阅读本文前必看）
+>
+> 本文主体是目标架构与方案草稿，不代表所有章节都已落地。当前代码与早期补充相比还有这些变化：
+>
+> - `ocr-assist` 的 VLM 实现仍保留，但 stage 入口已全局禁用，运行时沿用 ASR 切句。
+> - Demucs standalone 的构建脚本、三平台 workflow 配置与 electron-builder 接入点已完成；binary 属于 Git 外部产物，发版前需另行准备并验证。
+> - §7 的通用 Provider middleware、§16 的自动更新、§17 的测试/CI 都是规划目标；当前没有 Zod runtime IPC 校验、有效 lint 配置或 `pnpm test`，Main 也尚未调用 `electron-updater`。
+> - 当前实现真值优先级：代码 > `TECH-OVERVIEW-v0.5.md` / `TECHNICAL-GUIDE.md` > 本 TDD 主体。
 
 ---
 

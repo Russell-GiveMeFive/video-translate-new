@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api/index.js'
+import { useAppStore } from '../stores/app.js'
 import type { KeyName } from '@dramaprime/core-types'
 
 interface KeyField {
@@ -17,6 +18,7 @@ const KEY_FIELDS: KeyField[] = [
 ]
 
 export function Settings(): JSX.Element {
+  const sysInfo = useAppStore((s) => s.sysInfo)
   const [values, setValues] = useState<Record<string, string>>({})
   const [savingKey, setSavingKey] = useState<string | null>(null)
   const [testResult, setTestResult] = useState<Record<string, { ok: boolean; msg?: string }>>({})
@@ -91,7 +93,7 @@ export function Settings(): JSX.Element {
           </button>
           {Object.entries(testResult).map(([k, v]) => (
             <span key={k} className={`text-xs ${v.ok ? 'text-emerald-400' : 'text-rose-400'}`}>
-              {k}: {v.ok ? 'OK' : v.msg ?? 'failed'}
+              {k}: {v.ok ? 'OK' : (v.msg ?? 'failed')}
             </span>
           ))}
         </div>
@@ -99,7 +101,7 @@ export function Settings(): JSX.Element {
 
       <section className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-6 text-xs text-zinc-500">
         <h2 className="mb-3 text-sm font-semibold text-zinc-300">关于</h2>
-        <p>DramaPrime v0.1 · 短剧 AI 译制桌面工作站</p>
+        <p>DramaPrime v{sysInfo?.version ?? '—'} · 短剧 AI 译制桌面工作站</p>
         <p>本地数据：App Data 目录；API 密钥：系统 Keychain / DPAPI 加密存储</p>
         <button
           onClick={() => api.call('system:reveal-logs')}

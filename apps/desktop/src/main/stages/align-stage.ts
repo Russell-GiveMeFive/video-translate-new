@@ -1,7 +1,7 @@
 import { join } from 'node:path'
 import { existsSync } from 'node:fs'
 import type { Stage, StageRunContext, StageResult, ChatMessage } from '@dramaprime/core-types'
-import { asProjectId, asSegmentId } from '@dramaprime/core-types'
+import { asProjectId, LANG_MAP } from '@dramaprime/core-types'
 import {
   DEFAULT_ALIGN_CONFIG,
   planAlignment,
@@ -75,14 +75,17 @@ export const alignStage: Stage = {
         ctx.logger.info(`重译循环 round=${round}：没有溢出，进入 planner`)
         break
       }
-      ctx.logger.info(`重译循环 round=${round}：发现 ${overflowed.length} 个溢出 segment，开始压缩重译`, {
-        overflowed: overflowed.map((o) => ({
-          segId: o.segmentId,
-          ttsMs: o.ttsDurMs,
-          origMs: o.originalDurMs,
-          ratio: round3(o.ttsDurMs / o.originalDurMs),
-        })),
-      })
+      ctx.logger.info(
+        `重译循环 round=${round}：发现 ${overflowed.length} 个溢出 segment，开始压缩重译`,
+        {
+          overflowed: overflowed.map((o) => ({
+            segId: o.segmentId,
+            ttsMs: o.ttsDurMs,
+            origMs: o.originalDurMs,
+            ratio: round3(o.ttsDurMs / o.originalDurMs),
+          })),
+        },
+      )
       ctx.reportProgress(
         Math.round((round / MAX_RETRY_ROUNDS) * 30),
         `重译压缩 round ${round + 1}/${MAX_RETRY_ROUNDS}（${overflowed.length} 句）`,
@@ -184,10 +187,7 @@ export const alignStage: Stage = {
     })
     tx()
 
-    ctx.reportProgress(
-      100,
-      `对齐完成 ${plans.length} 句（${formatCountsLabel(counts)}）`,
-    )
+    ctx.reportProgress(100, `对齐完成 ${plans.length} 句（${formatCountsLabel(counts)}）`)
     return {
       kind: 'ok',
       outputs: { total: String(plans.length), counts: JSON.stringify(counts) },
@@ -222,10 +222,7 @@ const round3 = (n: number): number => Math.round(n * 1000) / 1000
 
 type SegRow = ReturnType<typeof SegmentRepo.list>[number]
 
-const buildTargets = (
-  segs: SegRow[],
-  voiceById: Map<string, string | null>,
-): AlignTarget[] =>
+const buildTargets = (segs: SegRow[], voiceById: Map<string, string | null>): AlignTarget[] =>
   segs.map((s) => ({
     segmentId: s.id,
     originalStartMs: s.startMs,
@@ -243,10 +240,7 @@ const buildTargets = (
  * 标准：ttsDur / origDur > SOLA 上限（默认 1.3）且 > tolerance
  * 即使开了 video-slow 也无法救（video-slow 上限默认 5%，远不够）
  */
-const findOverflowSegments = (
-  targets: AlignTarget[],
-  cfg: AlignConfig,
-): AlignTarget[] =>
+const findOverflowSegments = (targets: AlignTarget[], cfg: AlignConfig): AlignTarget[] =>
   targets.filter((t) => {
     const ratio = t.ttsDurMs / Math.max(1, t.originalDurMs)
     const offset = t.ttsDurMs - t.originalDurMs
@@ -264,7 +258,7 @@ const retranslateBatch = async (
   targetLang: string,
   ctx: StageRunContext,
 ): Promise<Map<string, string>> => {
-  const langLabel = LANG_LABEL[targetLang] ?? targetLang
+  const langLabel = LANG_MAP[targetLang]?.zhName ?? targetLang
   // 估算每句目标字数：以 ttsDurMs/origDurMs 比例反推应砍到的字数
   // 当前译文 N 字，目标 = N × (origDur / ttsDur) × 0.85（额外 15% 余量）
   const items = overflowed.map((t) => {
@@ -421,21 +415,6 @@ const retssBatch = async (
   }
 }
 
-const LANG_LABEL: Record<string, string> = {
-  en: '英语',
-  es: '西班牙语',
-  pt: '葡萄牙语',
-  ja: '日语',
-  id: '印尼语',
-  ko: '韩语',
-  vi: '越南语',
-  th: '泰语',
-  ar: '阿拉伯语',
-  fr: '法语',
-  de: '德语',
-  ru: '俄语',
-}
-
 // 重译后 TTS 复用 tts-stage 的情绪调优——这里复制一份避免跨文件依赖
 // 表保持一致：tts-stage.ts 改了这里也要同步改（虽然丑但简单）
 interface AlignEmotionTuning {
@@ -458,16 +437,16 @@ const emotionTuningForAlign = (raw: string | null | undefined): AlignEmotionTuni
   if (!raw) return ALIGN_EMOTION_TUNING.neutral!
   const key = raw.trim().toLowerCase()
   const mapped =
-    key === 'surprise' ? 'surprised' :
-    key === 'fear' ? 'fearful' :
-    key === 'disgust' ? 'disgusted' :
-    key
+    key === 'surprise'
+      ? 'surprised'
+      : key === 'fear'
+        ? 'fearful'
+        : key === 'disgust'
+          ? 'disgusted'
+          : key
   return ALIGN_EMOTION_TUNING[mapped] ?? ALIGN_EMOTION_TUNING.neutral!
 }
-const enrichTextWithPausesForAlign = (
-  text: string,
-  emotion: string | null | undefined,
-): string => {
+const enrichTextWithPausesForAlign = (text: string, emotion: string | null | undefined): string => {
   if (!text) return text
   const e = (emotion ?? '').trim().toLowerCase()
   if (/<#\d/.test(text)) return text

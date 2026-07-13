@@ -13,15 +13,11 @@
 brew install node@20
 npm i -g pnpm
 
-# Python 3.11 (sidecar v0.2 用)
+# Python 3.11（可选：重建 bundled Demucs 或使用 system fallback）
 brew install python@3.11
 
-# ffmpeg 静态二进制（v0.2 用，先放进 binaries 目录）
-brew install ffmpeg
-mkdir -p binaries/ffmpeg/darwin-arm64
-cp "$(which ffmpeg)"  binaries/ffmpeg/darwin-arm64/
-cp "$(which ffprobe)" binaries/ffmpeg/darwin-arm64/
-# Intel Mac 同理放 binaries/ffmpeg/darwin-x64/
+# 可选：开发环境没有对应平台 bundled binary 时，用 system demucs 兜底
+python3.11 -m pip install demucs
 ```
 
 ### Windows
@@ -31,12 +27,11 @@ cp "$(which ffprobe)" binaries/ffmpeg/darwin-arm64/
 choco install nodejs-lts
 npm i -g pnpm
 
-# Python 3.11
+# Python 3.11（可选：重建 bundled Demucs 或使用 system fallback）
 choco install python --version=3.11
 
-# ffmpeg 静态二进制
-choco install ffmpeg
-# 把 ffmpeg.exe / ffprobe.exe 复制到 binaries\ffmpeg\win32-x64\
+# 可选：开发环境没有对应平台 bundled binary 时，用 system demucs 兜底
+python -m pip install demucs
 ```
 
 ### 安装依赖
@@ -44,6 +39,8 @@ choco install ffmpeg
 ```bash
 pnpm install
 ```
+
+ffmpeg / ffprobe 由 `@ffmpeg-installer` / `@ffprobe-installer` 随 `pnpm install` 提供，不再要求手工复制。Demucs 发行产物不进 Git：正式打包前运行 `packaging/demucs/build.sh` / `build.ps1`，或从 `Build Demucs Binary` workflow 下载对应平台 artifact 到 `binaries/demucs/<platform-arch>/`。
 
 如果 `better-sqlite3` 或 `keytar` 编译失败：
 
@@ -101,6 +98,7 @@ pnpm clean
 | translate | MiniMax M3（Anthropic 兼容） | ✓ 需 MiniMax api_key |
 | tts-synth | MiniMax Speech-2.8（T2A v2） | ✓ 需 MiniMax api_key |
 | voice-clone | MiniMax 三步走（upload → clone → 7d 临时音色） | ✓ 需 MiniMax api_key |
+| demix | system demucs 优先、bundled PyInstaller binary 兜底 | ✓ 缺两者时 skipped，并降级使用源音轨 |
 | align | @dramaprime/align-engine 5 级级联 + rubberband / ffmpeg atempo | ✓ 真实化 (v0.3) |
 | subtitle-burn | @dramaprime/subtitle ASS + SRT 生成（含中-英双语布局） | ✓ 真实化 (v0.4) |
 | mix-render | ffmpeg filter_complex 拼 TTS 音频（自动用 .aligned.mp3）+ 原视频画面 + **可选 libass 烧字幕** | ✓ |
@@ -111,9 +109,9 @@ pnpm clean
 | :-- | :-- |
 | import-precheck | v0.5 接 sidecar PaddleOCR |
 | shot-detect | v0.5 接 sidecar PySceneDetect |
-| demix | v0.5 接 sidecar Demucs |
-| ocr-assist | v0.5 接 sidecar PaddleOCR |
 | finalize | v0.5 工程包导出 |
+
+`ocr-assist` 不属于 mock：VLM OCR 的实现代码仍在，但当前因画面文字误识别和内容审核问题在 stage 入口全局 `skipped`，实际沿用 ASR 切句。
 
 ### 时长对齐工程小贴士
 
@@ -125,7 +123,7 @@ pnpm clean
 
 进设置页填 `MiniMax.api_key` → 保存 → 自动热切换：
 - LLM / TTS / VoiceClone：mock → real（看 main 终端日志的 `providers refreshed`）
-- ASR：仍 mock（v0.2.b1 接 Whisper 后切换 / v0.2.5 火山接入后切换）
+- ASR：填齐 `volcengine.app_id` + `volcengine.access_token` 后热切换到真实火山 Seed-ASR；缺 Key 时使用 mock
 
 ---
 
@@ -134,15 +132,12 @@ pnpm clean
 ### macOS
 
 ```bash
-# 配置环境变量（用于签名 + 公证）
-export APPLE_ID="you@example.com"
-export APPLE_ID_PASSWORD="app-specific-password"
-export APPLE_TEAM_ID="XXXXXXXXXX"
+# 配置环境变量（当前构建配置只使用签名；notarize 仍为 false）
 export CSC_LINK="path/to/DeveloperIDCert.p12"
 export CSC_KEY_PASSWORD="cert-password"
 
 pnpm dist:mac
-# 产物：apps/desktop/release/DramaPrime-0.1.0-universal.dmg
+# 当前配置产物：apps/desktop/release/DramaPrime-0.5.0-arm64.dmg
 ```
 
 ### Windows
@@ -153,14 +148,12 @@ $env:CSC_LINK="C:\path\to\ev-cert.pfx"
 $env:CSC_KEY_PASSWORD="cert-password"
 
 pnpm dist:win
-# 产物：apps\desktop\release\DramaPrime-0.1.0-x64-Setup.exe
-#       apps\desktop\release\DramaPrime-0.1.0-x64-Setup.exe (portable 版同名加 -portable)
+# 当前配置产物：apps\desktop\release\DramaPrime-0.5.0-x64-Setup.exe
 ```
 
 ### 自动更新 feed
 
-更新前在自托管 CDN 放 `latest-mac.yml` / `latest.yml` + 对应的 dmg/exe。
-`electron-updater` 会在客户端启动 30s 后自动检查。
+⏳ **尚未接入**。项目已安装 `electron-updater` 依赖，但 Main 进程没有检查、下载或安装更新的调用；当前版本仍需重新下载安装包升级。未来接入时再配置自托管 CDN 的 `latest-mac.yml` / `latest.yml` 与签名产物。
 
 ---
 

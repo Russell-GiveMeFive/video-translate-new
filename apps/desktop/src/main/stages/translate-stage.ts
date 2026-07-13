@@ -1,5 +1,5 @@
 import type { Stage, StageRunContext, StageResult, ChatMessage } from '@dramaprime/core-types'
-import { asProjectId, asSegmentId } from '@dramaprime/core-types'
+import { asProjectId, LANG_MAP } from '@dramaprime/core-types'
 import { providers } from '../providers/index.js'
 import { ProjectRepo } from '../storage/project-repo.js'
 import { SegmentRepo } from '../storage/segment-repo.js'
@@ -40,12 +40,12 @@ export const translateStage: Stage = {
     const characters = CharacterRepo.list(ctx.projectId as any)
     const charMap = new Map(characters.map((c) => [c.id, c]))
     const targetLang = project.targetLang
-    const k = K_TABLE[targetLang] ?? 1.6
+    const k = LANG_MAP[targetLang]?.kFactor ?? 1.6
     const llm = providers().llm
 
     // 分批：每批 ≤ 12 句，按原顺序
     const BATCH = 12
-    const batches: typeof segs[] = []
+    const batches: (typeof segs)[] = []
     for (let i = 0; i < segs.length; i += BATCH) batches.push(segs.slice(i, i + BATCH))
 
     let done = 0
@@ -98,9 +98,7 @@ export const translateStage: Stage = {
       const validIdxSet = new Set(batch.map((s) => String(s.idx)))
       const responseKeys = Object.keys(batchResult)
       const unknownKeys = responseKeys.filter((k) => !validIdxSet.has(k))
-      const missingIdxs = batch
-        .map((s) => String(s.idx))
-        .filter((k) => !(k in batchResult))
+      const missingIdxs = batch.map((s) => String(s.idx)).filter((k) => !(k in batchResult))
       if (unknownKeys.length > 0 || missingIdxs.length > 0) {
         ctx.logger.warn('翻译 batch idx 映射不匹配', {
           batch: bi,
@@ -132,9 +130,7 @@ export const translateStage: Stage = {
         )
       }
 
-      const stmt = db().prepare(
-        `UPDATE segments SET tgt_text = ? WHERE id = ?`,
-      )
+      const stmt = db().prepare(`UPDATE segments SET tgt_text = ? WHERE id = ?`)
       const tx = db().transaction(() => {
         for (const s of batch) {
           const r = batchResult[String(s.idx)]
@@ -189,12 +185,18 @@ const buildBatchMessages = (
     srcText: string | null
     emotion: string | null
   }>,
-  charMap: Map<string, { id: string; name: string | null; gender: string | null; ageBand: string | null }>,
+  charMap: Map<
+    string,
+    { id: string; name: string | null; gender: string | null; ageBand: string | null }
+  >,
   targetLang: string,
   k: number,
 ): ChatMessage[] => {
-  const langLabel = LANG_LABEL[targetLang] ?? targetLang
-  const regionRule = REGION_NEUTRAL[targetLang] ?? ''
+  const language = LANG_MAP[targetLang]
+  const langLabel = language?.zhName ?? targetLang
+  const regionRule = language?.regionNeutralRule
+    ? `\n6. 地区中性化：${language.regionNeutralRule}`
+    : ''
 
   const systemPrompt = `你是专业的短剧译制译者，将中文台词翻译为${langLabel}。
 
@@ -344,13 +346,16 @@ const retranslateIndividually = async (
     srcText: string | null
     emotion: string | null
   }>,
-  charMap: Map<string, { id: string; name: string | null; gender: string | null; ageBand: string | null }>,
+  charMap: Map<
+    string,
+    { id: string; name: string | null; gender: string | null; ageBand: string | null }
+  >,
   targetLang: string,
   k: number,
   batchResult: Record<string, BatchItem>,
   ctx: StageRunContext,
 ): Promise<void> => {
-  const langLabel = LANG_LABEL[targetLang] ?? targetLang
+  const langLabel = LANG_MAP[targetLang]?.zhName ?? targetLang
 
   for (const s of badSegs) {
     if (ctx.signal.aborted) return
@@ -395,93 +400,4 @@ const retranslateIndividually = async (
       })
     }
   }
-}
-
-// ─── 配置表（精简版，全语种见附录 A.2） ──────────────────────────────
-
-const K_TABLE: Record<string, number> = {
-  en: 1.6,
-  es: 1.8,
-  pt: 1.7,
-  ja: 1.3,
-  id: 1.5,
-  ko: 1.2,
-  vi: 1.6,
-  th: 1.4,
-  ar: 1.5,
-  fr: 1.7,
-  de: 1.6,
-  ru: 1.5,
-  it: 1.7,
-  tr: 1.5,
-  fil: 1.6,
-  ms: 1.5,
-  hi: 1.5,
-  pl: 1.6,
-  nl: 1.7,
-  yue: 1.0,
-}
-
-const LANG_LABEL: Record<string, string> = {
-  en: '英语',
-  es: '西班牙语',
-  pt: '葡萄牙语',
-  ja: '日语',
-  id: '印尼语',
-  ko: '韩语',
-  vi: '越南语',
-  th: '泰语',
-  ar: '阿拉伯语',
-  fr: '法语',
-  de: '德语',
-  ru: '俄语',
-  it: '意大利语',
-  tr: '土耳其语',
-  fil: '菲律宾语',
-  ms: '马来语',
-  hi: '印地语',
-  pl: '波兰语',
-  nl: '荷兰语',
-  yue: '粤语',
-}
-
-const REGION_NEUTRAL: Record<string, string> = {
-  en: '\n6. 使用中性 General American 拼写，避免英式 colour/centre。',
-  es: '\n6. 默认 LATAM 中性西语：**禁用 vosotros 变位**；慎用 coger（拉美俚语含义）。',
-  pt: '\n6. 默认 pt-BR：你→você，避免欧葡 tu 变位。',
-  ar: '\n6. 走 MSA（现代标准阿拉伯语），避免埃及/海湾方言。',
-  fr: '\n6. 默认欧法，避免 char→tank 等加拿大特有口语。',
-  de: '\n6. 标准德语，避免奥地利/瑞士专属词。',
-  nl: '\n6. 标准荷语，避免比利时弗拉芒专属词。',
-  id: '\n6. 中性印尼语，避免 Bahasa Melayu 专属词。',
-  ms: '\n6. 默认马来西亚标准，避免印尼语借词混用。',
-  fil: '\n6. 中性 Tagalog，慎用宿务语借词。',
-  vi: '\n6. 中性北越为主，避免南越方言。',
-}
-
-/**
- * 各目标语种的常见口语语气词 / 感叹词——给 LLM 看，让译文更自然更有"喘息感"。
- * 短剧 dubbing 关键：加了这些之后听起来才像"真人在说话"而不是"在念稿"。
- */
-const INTERJECTION_HINT: Record<string, string> = {
-  en: '"oh"/"uh"/"hey"/"ah"/"wow"/"hmm"/"yeah"/"well"',
-  es: '"ay"/"oye"/"bueno"/"vaya"/"eh"/"pues"/"vale"',
-  pt: '"ah"/"oh"/"ué"/"né"/"nossa"/"tá"/"hein"',
-  ja: '"あの"/"ええと"/"うん"/"へえ"/"ね"/"よ"/"ああ"',
-  id: '"eh"/"loh"/"kan"/"sih"/"deh"/"dong"/"wah"/"aduh"',
-  ko: '"어"/"음"/"아"/"야"/"네"/"뭐"/"오"',
-  vi: '"ờ"/"à"/"ơi"/"đấy"/"thôi"/"này"/"thì"',
-  th: '"เออ"/"นะ"/"จัง"/"แหละ"/"โอ้"/"อ้าว"/"เอ้"',
-  ar: '"يا"/"ها"/"آه"/"يااه"/"ولله"/"طب"',
-  fr: '"euh"/"ben"/"bah"/"oh"/"ah"/"eh"/"hein"',
-  de: '"ach"/"naja"/"hm"/"tja"/"echt"/"oh"',
-  ru: '"ну"/"ой"/"ах"/"эй"/"же"/"ведь"',
-  it: '"eh"/"beh"/"oh"/"ah"/"mah"/"dai"',
-  tr: '"ay"/"ya"/"hadi"/"vay"/"yahu"/"abi"',
-  fil: '"oo"/"naku"/"grabe"/"ay"/"diba"/"naman"',
-  ms: '"eh"/"alamak"/"lah"/"kan"/"weh"',
-  hi: '"arre"/"oye"/"haan"/"yaar"/"oho"',
-  pl: '"no"/"oj"/"ach"/"ehh"',
-  nl: '"hè"/"oh"/"nou"/"goh"',
-  yue: '"哎"/"咧"/"啦"/"喎"/"嘛"/"嗰"',
 }
